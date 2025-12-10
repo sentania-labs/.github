@@ -1,12 +1,3 @@
 ## Hi there 👋
 
-<!--
-
-**Here are some ideas to get you started:**
-
-🙋‍♀️ A short introduction - what is your organization all about?
-🌈 Contribution guidelines - how can the community get involved?
-👩‍💻 Useful resources - where can the community find your docs? Is there anything else the community should know?
-🍿 Fun facts - what does your team eat for breakfast?
-🧙 Remember, you can do mighty things with the power of [Markdown](https://docs.github.com/github/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax)
--->
+I'm Scott Bowe.  I am a Solutions Architect at Broadcom.  I focus on the Automation and Operations componants of the VCF Stack.  I created this organization to enable a better experience for myself, I'm able to self-host runners that can be shared by all of my repositories.  In this organization you might find some usefual code examples for VCF Operations and VCF Automation.
