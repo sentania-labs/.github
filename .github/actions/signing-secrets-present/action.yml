@@ -1,0 +1,63 @@
+# Refuse to start a release without every signing secret.
+#
+# Run this in the first job of a release, before anything is built. A missing
+# secret is fatal to the release either way, and finding that out here costs
+# seconds, where finding it out in the notarize step costs the whole build
+# matrix first. Values are tested, never printed: only the NAME of a missing
+# secret reaches the log.
+#
+# The secrets are org-level on sentania-labs with visibility "selected
+# repositories". A repo that gets an empty value here is almost always one
+# that has not been added to that list yet (org settings > Secrets and
+# variables > Actions > the secret > Repository access).
+
+name: Signing secrets present
+description: Fail fast unless every macOS signing and notarization secret has a value.
+
+inputs:
+  macos-cert-p12:
+    description: secrets.MACOS_CERT_P12
+    required: true
+  macos-cert-password:
+    description: secrets.MACOS_CERT_PASSWORD
+    required: true
+  macos-team-id:
+    description: secrets.MACOS_TEAM_ID
+    required: true
+  notary-issuer-id:
+    description: secrets.NOTARY_ISSUER_ID
+    required: true
+  notary-key-id:
+    description: secrets.NOTARY_KEY_ID
+    required: true
+  notary-key-p8:
+    description: secrets.NOTARY_KEY_P8
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Check every secret has a value
+      shell: bash
+      env:
+        MACOS_CERT_P12: ${{ inputs.macos-cert-p12 }}
+        MACOS_CERT_PASSWORD: ${{ inputs.macos-cert-password }}
+        MACOS_TEAM_ID: ${{ inputs.macos-team-id }}
+        NOTARY_ISSUER_ID: ${{ inputs.notary-issuer-id }}
+        NOTARY_KEY_ID: ${{ inputs.notary-key-id }}
+        NOTARY_KEY_P8: ${{ inputs.notary-key-p8 }}
+      run: |
+        missing=""
+        for name in MACOS_CERT_P12 MACOS_CERT_PASSWORD MACOS_TEAM_ID \
+                    NOTARY_ISSUER_ID NOTARY_KEY_ID NOTARY_KEY_P8; do
+          # Indirect expansion: the value is tested without being printed.
+          if [ -z "${!name:-}" ]; then
+            missing="$missing $name"
+          fi
+        done
+        if [ -n "$missing" ]; then
+          echo "::error::signing secrets with no value in this repository:$missing"
+          echo "::error::they are sentania-labs org secrets scoped to selected repositories; add this repository to each, or a release would ship a macOS binary nobody can run"
+          exit 1
+        fi
+        echo "all six signing secrets are present"

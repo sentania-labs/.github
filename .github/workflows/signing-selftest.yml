@@ -1,0 +1,118 @@
+# Prove the org's signing setup works, without spending a tag anywhere.
+#
+# Builds a throwaway "hello" binary on each platform, signs it with the shared
+# actions in this repo, and (macOS) has Apple notarize it. Green here means the
+# org secrets are present and correct and the actions behave; a consumer
+# repo's release can then only fail on something of its own.
+#
+# Run by hand from the Actions tab. The Windows leg is opt-in until the Azure
+# Artifact Signing account exists (Scott, 2026-09-30: setting it up).
+#
+# Placement (github-ci skill): GitHub-hosted, because it needs macOS and
+# Windows runners; free on this public repo.
+
+name: Signing self-test
+
+on:
+  workflow_dispatch:
+    inputs:
+      windows:
+        description: "Also run the Windows (Azure Artifact Signing) leg"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/signing-secrets-present
+        with:
+          macos-cert-p12: ${{ secrets.MACOS_CERT_P12 }}
+          macos-cert-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+          macos-team-id: ${{ secrets.MACOS_TEAM_ID }}
+          notary-issuer-id: ${{ secrets.NOTARY_ISSUER_ID }}
+          notary-key-id: ${{ secrets.NOTARY_KEY_ID }}
+          notary-key-p8: ${{ secrets.NOTARY_KEY_P8 }}
+
+  macos:
+    needs: secrets
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest        # Apple Silicon
+            name: arm64
+          - os: macos-15-intel      # current Intel image (macos-13 is retired)
+            name: x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build a throwaway binary
+        run: |
+          mkdir -p dist
+          printf '#include <stdio.h>\nint main(void){puts("hello from sentania-labs signing self-test");return 0;}\n' > hello.c
+          clang -o dist/hello-${{ matrix.name }} hello.c
+          ./dist/hello-${{ matrix.name }}
+
+      - name: Sign
+        uses: ./.github/actions/macos-sign
+        with:
+          binary: dist/hello-${{ matrix.name }}
+          macos-cert-p12: ${{ secrets.MACOS_CERT_P12 }}
+          macos-cert-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+          macos-team-id: ${{ secrets.MACOS_TEAM_ID }}
+
+      - name: The signed binary still runs
+        run: ./dist/hello-${{ matrix.name }}
+
+      - name: Notarize
+        id: notarize
+        uses: ./.github/actions/macos-notarize
+        with:
+          binary: dist/hello-${{ matrix.name }}
+          notary-issuer-id: ${{ secrets.NOTARY_ISSUER_ID }}
+          notary-key-id: ${{ secrets.NOTARY_KEY_ID }}
+          notary-key-p8: ${{ secrets.NOTARY_KEY_P8 }}
+
+      - name: Result
+        run: echo "notarized in ${{ steps.notarize.outputs.seconds }}s (submission ${{ steps.notarize.outputs.submission-id }})"
+
+  windows:
+    if: inputs.windows
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write   # OIDC login to Azure
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build a throwaway binary
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          # The .NET Framework C# compiler ships with Windows itself, so this
+          # needs no toolchain lookup and produces an ordinary signable .exe.
+          Set-Content hello.cs 'class P { static void Main() { System.Console.WriteLine("hello from sentania-labs signing self-test"); } }'
+          & "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /out:dist\hello.exe hello.cs
+          .\dist\hello.exe
+
+      - name: Sign
+        uses: ./.github/actions/windows-sign
+        with:
+          files: ${{ github.workspace }}\dist\hello.exe
+          endpoint: ${{ secrets.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.ARTIFACT_SIGNING_PROFILE }}
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: The signed binary still runs
+        shell: pwsh
+        run: .\dist\hello.exe
