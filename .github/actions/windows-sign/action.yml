@@ -26,7 +26,7 @@ description: Authenticode-sign files through Azure Artifact Signing with OIDC lo
 
 inputs:
   files:
-    description: Files to sign, comma or newline separated (Windows paths are fine).
+    description: Files to sign, comma or newline separated, as ABSOLUTE Windows paths (the signing action requires them; use ${{ github.workspace }}\\dist\\x.exe).
     required: true
   endpoint:
     description: Artifact Signing endpoint, e.g. https://eus.codesigning.azure.net/

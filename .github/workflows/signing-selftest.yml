@@ -85,7 +85,6 @@ jobs:
 
   windows:
     if: inputs.windows
-    needs: secrets
     runs-on: windows-latest
     permissions:
       contents: read
@@ -97,8 +96,10 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Set-Content hello.c "#include <stdio.h>`nint main(void){puts(`"hello from sentania-labs signing self-test`");return 0;}"
-          & "C:\Program Files\LLVM\bin\clang.exe" -o dist\hello.exe hello.c
+          # The .NET Framework C# compiler ships with Windows itself, so this
+          # needs no toolchain lookup and produces an ordinary signable .exe.
+          Set-Content hello.cs 'class P { static void Main() { System.Console.WriteLine("hello from sentania-labs signing self-test"); } }'
+          & "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /out:dist\hello.exe hello.cs
           .\dist\hello.exe
 
       - name: Sign

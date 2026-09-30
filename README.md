@@ -61,10 +61,15 @@ jobs:
           notary-issuer-id: ${{ secrets.NOTARY_ISSUER_ID }}
           notary-key-id: ${{ secrets.NOTARY_KEY_ID }}
           notary-key-p8: ${{ secrets.NOTARY_KEY_P8 }}
+      # If a step of yours between sign and notarize can fail, remove the
+      # keychain yourself; only matters on a self-hosted Mac (hosted runners
+      # are discarded). macos-sign and macos-notarize clean up their own failures.
+      - if: always() && runner.os == 'macOS'
+        run: security delete-keychain "${KEYCHAIN:-$RUNNER_TEMP/signing.keychain-db}" 2>/dev/null || true
       - uses: sentania-labs/.github/.github/actions/windows-sign@<sha>
         if: runner.os == 'Windows'   # the job needs permissions: id-token: write
         with:
-          files: dist\<binary>.exe
+          files: ${{ github.workspace }}\dist\<binary>.exe   # absolute paths
           endpoint: ${{ secrets.ARTIFACT_SIGNING_ENDPOINT }}
           signing-account-name: ${{ secrets.ARTIFACT_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ secrets.ARTIFACT_SIGNING_PROFILE }}
