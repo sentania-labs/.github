@@ -1,0 +1,109 @@
+# Authenticode-sign Windows binaries with Azure Artifact Signing.
+#
+# Azure Artifact Signing (Microsoft's cloud signing service, formerly Trusted
+# Signing) holds the certificate in Microsoft's HSM and issues short-lived
+# certificates per signature, so no certificate file or password ever lives
+# in GitHub. The job authenticates to Azure with OpenID Connect: GitHub mints
+# a token for the run, Azure's app registration trusts it through a federated
+# credential, and no client secret exists to leak or rotate. The caller must
+# grant `id-token: write` for that to work.
+#
+# Runs on a Windows runner. Signs every file listed, SHA-256 digest, with an
+# RFC 3161 timestamp from Microsoft so the signature outlives the short
+# certificate. Fails loudly when the Azure identifiers have no value, the same
+# way the macOS actions do: a release must never ship an unsigned .exe by
+# accident.
+#
+# Identifiers come from the caller as inputs. They are sentania-labs org
+# secrets scoped to selected repositories: AZURE_TENANT_ID, AZURE_CLIENT_ID,
+# AZURE_SUBSCRIPTION_ID, plus the signing account and certificate profile
+# names (ARTIFACT_SIGNING_ENDPOINT, ARTIFACT_SIGNING_ACCOUNT,
+# ARTIFACT_SIGNING_PROFILE). None of those are secret in themselves; keeping
+# them as secrets means one place to change them for every repo.
+
+name: Windows sign
+description: Authenticode-sign files through Azure Artifact Signing with OIDC login.
+
+inputs:
+  files:
+    description: Files to sign, comma or newline separated (Windows paths are fine).
+    required: true
+  endpoint:
+    description: Artifact Signing endpoint, e.g. https://eus.codesigning.azure.net/
+    required: true
+  signing-account-name:
+    description: The Artifact Signing account name.
+    required: true
+  certificate-profile-name:
+    description: The certificate profile (Public Trust) inside that account.
+    required: true
+  azure-tenant-id:
+    description: secrets.AZURE_TENANT_ID
+    required: true
+  azure-client-id:
+    description: secrets.AZURE_CLIENT_ID (the app registration with a federated credential for this repo).
+    required: true
+  azure-subscription-id:
+    description: secrets.AZURE_SUBSCRIPTION_ID
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Refuse to run without every Azure identifier
+      shell: bash
+      env:
+        AZURE_TENANT_ID: ${{ inputs.azure-tenant-id }}
+        AZURE_CLIENT_ID: ${{ inputs.azure-client-id }}
+        AZURE_SUBSCRIPTION_ID: ${{ inputs.azure-subscription-id }}
+        ENDPOINT: ${{ inputs.endpoint }}
+        ACCOUNT: ${{ inputs.signing-account-name }}
+        PROFILE: ${{ inputs.certificate-profile-name }}
+      run: |
+        if [ "$RUNNER_OS" != "Windows" ]; then
+          echo "::error::windows-sign needs a Windows runner (signtool); this is $RUNNER_OS"
+          exit 1
+        fi
+        missing=""
+        for name in AZURE_TENANT_ID AZURE_CLIENT_ID AZURE_SUBSCRIPTION_ID ENDPOINT ACCOUNT PROFILE; do
+          if [ -z "${!name:-}" ]; then missing="$missing $name"; fi
+        done
+        if [ -n "$missing" ]; then
+          echo "::error::Windows signing inputs with no value:$missing"
+          echo "::error::they are sentania-labs org secrets scoped to selected repositories; add this repository, or do not call windows-sign yet"
+          exit 1
+        fi
+
+    - name: Log in to Azure with the run's OIDC token
+      uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+      with:
+        tenant-id: ${{ inputs.azure-tenant-id }}
+        client-id: ${{ inputs.azure-client-id }}
+        subscription-id: ${{ inputs.azure-subscription-id }}
+
+    - name: Sign
+      uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+      with:
+        endpoint: ${{ inputs.endpoint }}
+        signing-account-name: ${{ inputs.signing-account-name }}
+        certificate-profile-name: ${{ inputs.certificate-profile-name }}
+        files: ${{ inputs.files }}
+        file-digest: SHA256
+        timestamp-rfc3161: http://timestamp.acs.microsoft.com
+        timestamp-digest: SHA256
+
+    - name: Verify the signatures
+      shell: pwsh
+      env:
+        FILES: ${{ inputs.files }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $list = $env:FILES -split '[,\r\n]+' | Where-Object { $_.Trim() -ne '' }
+        foreach ($f in $list) {
+          $sig = Get-AuthenticodeSignature -FilePath $f.Trim()
+          Write-Host ("{0}: {1} ({2})" -f $f.Trim(), $sig.Status, $sig.SignerCertificate.Subject)
+          if ($sig.Status -ne 'Valid') {
+            Write-Host "::error::$f is not validly signed: $($sig.Status) $($sig.StatusMessage)"
+            exit 1
+          }
+        }

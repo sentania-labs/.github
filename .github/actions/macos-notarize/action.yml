@@ -1,0 +1,170 @@
+# Have Apple notarize a signed macOS binary, and remove the signing keychain.
+#
+# Runs after macos-sign (and after the caller's own smoke test, if any). The
+# gate is notarytool reporting Accepted: that is Apple stating it notarized
+# this binary, and anything else fails the step. A release that depends on
+# this depends on Apple; when the notary service is slow or down the caller's
+# release fails and nothing ships, which is the intended outcome (an unsigned
+# macOS binary nobody can run is the problem this exists to fix). Recovery is
+# `gh run rerun <run-id> --failed` against the same tag.
+#
+# The ticket is NOT stapled, because a ticket can only be stapled to a bundle
+# (.app, .dmg, .pkg) and most callers ship a bare executable. The first run on
+# a given Mac asks Apple about the binary over the network; anyone who just
+# downloaded it from a GitHub release is online. An offline machine would need
+# a signed .pkg, which needs a Developer ID Installer certificate the org does
+# not hold.
+#
+# Secrets come from the caller as inputs: NOTARY_ISSUER_ID, NOTARY_KEY_ID,
+# NOTARY_KEY_P8 (base64 of the App Store Connect API key .p8).
+
+name: macOS notarize
+description: Submit a signed binary to Apple's notary service and fail unless it is Accepted.
+
+inputs:
+  binary:
+    description: Path of the signed Mach-O to notarize.
+    required: true
+  timeout:
+    description: >
+      How long to wait for Apple's verdict (notarytool --timeout syntax). On
+      2026-09-15 Apple took 68 to 96 minutes for the first two submissions from
+      this org; elsewhere it is usually under a minute. Waiting costs nothing
+      when Apple is quick.
+    required: false
+    default: 2h
+  notary-issuer-id:
+    description: secrets.NOTARY_ISSUER_ID
+    required: true
+  notary-key-id:
+    description: secrets.NOTARY_KEY_ID
+    required: true
+  notary-key-p8:
+    description: secrets.NOTARY_KEY_P8 (base64 of the .p8).
+    required: true
+
+outputs:
+  submission-id:
+    description: Apple's submission UUID.
+    value: ${{ steps.notarize.outputs.submission-id }}
+  seconds:
+    description: Round-trip time in seconds.
+    value: ${{ steps.notarize.outputs.seconds }}
+
+runs:
+  using: composite
+  steps:
+    - name: Notarize
+      id: notarize
+      shell: bash
+      env:
+        BIN: ${{ inputs.binary }}
+        TIMEOUT: ${{ inputs.timeout }}
+        NOTARY_ISSUER_ID: ${{ inputs.notary-issuer-id }}
+        NOTARY_KEY_ID: ${{ inputs.notary-key-id }}
+        NOTARY_KEY_P8: ${{ inputs.notary-key-p8 }}
+      run: |
+        set -euo pipefail
+        if [ "$RUNNER_OS" != "macOS" ]; then
+          echo "::error::macos-notarize needs a macOS runner (notarytool); this is $RUNNER_OS"
+          exit 1
+        fi
+        if [ -z "${NOTARY_ISSUER_ID:-}" ] || [ -z "${NOTARY_KEY_ID:-}" ] || [ -z "${NOTARY_KEY_P8:-}" ]; then
+          echo "::error::NOTARY_ISSUER_ID / NOTARY_KEY_ID / NOTARY_KEY_P8 have no value; is this repository on the org secrets' repository list?"
+          exit 1
+        fi
+        [ -e "$BIN" ] || { echo "::error::no such file to notarize: $BIN"; exit 1; }
+        printf '%s' "$NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+        # notarytool only accepts an archive, never a bare executable, so the
+        # binary is zipped for submission. Apple notarizes what is inside;
+        # the zip is thrown away and the caller still ships the binary, which
+        # now carries a signature Apple has vouched for.
+        /usr/bin/ditto -c -k "$BIN" "$RUNNER_TEMP/notarize.zip"
+        started=$(date +%s)
+        set +e
+        xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+          --key "$RUNNER_TEMP/notary.p8" \
+          --key-id "$NOTARY_KEY_ID" \
+          --issuer "$NOTARY_ISSUER_ID" \
+          --wait --timeout "$TIMEOUT" \
+          --output-format json > "$RUNNER_TEMP/notary.out" 2> "$RUNNER_TEMP/notary.err"
+        rc=$?
+        set -e
+        elapsed=$(( $(date +%s) - started ))
+        mins=$(( elapsed / 60 ))
+        echo "--- notarytool stdout ---"; cat "$RUNNER_TEMP/notary.out" || true
+        echo "--- notarytool stderr ---"; cat "$RUNNER_TEMP/notary.err" || true
+        # Every run records how long Apple took, so the next slow day has a
+        # history to compare against instead of a guess.
+        echo "notarization round trip: ${elapsed}s (${mins} min)"
+        echo "seconds=$elapsed" >> "$GITHUB_OUTPUT"
+
+        # Read the verdict from whichever stream carried it. When a release
+        # timed out on 2026-09-15, its payload appeared exactly once in the
+        # job log, equally consistent with stdout and with stderr. Try both
+        # and take the first that parses.
+        status=UNKNOWN
+        sub="-"
+        for f in "$RUNNER_TEMP/notary.out" "$RUNNER_TEMP/notary.err"; do
+          [ -s "$f" ] || continue
+          parsed="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print((d.get('status') or 'UNKNOWN') + '\t' + (d.get('id') or '-'))" "$f" 2>/dev/null)" || continue
+          [ -n "$parsed" ] || continue
+          status="${parsed%%$'\t'*}"
+          sub="${parsed##*$'\t'}"
+          break
+        done
+        echo "submission-id=$sub" >> "$GITHUB_OUTPUT"
+
+        # Only these three are verdicts. Anything else, including the
+        # "In Progress" that a timeout may carry and the absent status it may
+        # carry instead, means Apple has not finished.
+        case "$status" in
+          Accepted)
+            if [ "$rc" != "0" ]; then
+              echo "::error::Apple reported Accepted but notarytool exited $rc; refusing to treat that as success"
+              exit 1
+            fi
+            echo "Apple notarized this binary (submission $sub, ${elapsed}s / ${mins} min)"
+            ;;
+          Invalid|Rejected)
+            echo "::error::Apple rejected this binary (status=$status, submission $sub, after ${mins} min)"
+            # The submission log is the only thing that says WHY.
+            xcrun notarytool log "$sub" \
+              --key "$RUNNER_TEMP/notary.p8" \
+              --key-id "$NOTARY_KEY_ID" \
+              --issuer "$NOTARY_ISSUER_ID" || true
+            exit 1
+            ;;
+          *)
+            if [ "$sub" = "-" ]; then
+              # No id means notarytool never got as far as a submission: bad
+              # credentials, no network, a malformed archive.
+              echo "::error::notarytool failed before Apple accepted a submission (exit $rc, after ${mins} min)"
+              echo "::error::Its stdout and stderr are above. This is a client-side or credential failure, not a verdict."
+            else
+              echo "::error::Apple returned no verdict in ${mins} min, so this run stopped waiting (status=$status)."
+              echo "::error::Submission $sub is still being processed. It was NOT rejected."
+              echo "::error::Watch it with the 'Notary diagnostics' workflow in sentania-labs/.github, passing that id."
+              echo "::error::Once Apple reports Accepted, re-run this workflow with: gh run rerun $GITHUB_RUN_ID --failed"
+              echo "::error::That rebuilds and submits afresh rather than reusing this submission."
+            fi
+            exit 1
+            ;;
+        esac
+        rm -f "$RUNNER_TEMP/notary.p8"
+        # Reporting, not a gate. A local Gatekeeper assessment of an unstapled
+        # binary is an online lookup whose answer is not reliably servable the
+        # moment notarization finishes, and `spctl --status` can be off on a
+        # runner image. It runs because the output is useful when something
+        # is wrong.
+        echo "--- gatekeeper assessment (advisory) ---"
+        spctl -a -t exec -vv "$BIN" 2>&1 || echo "::warning::spctl did not accept the binary; notarization itself reported Accepted"
+        codesign --verify --strict --test-requirement="=notarized" --verbose=2 "$BIN" 2>&1 || echo "::warning::the notarization requirement did not verify locally; this can be Apple-side propagation"
+
+    - name: Remove the signing keychain and key material
+      if: always()
+      shell: bash
+      run: |
+        security delete-keychain "${KEYCHAIN:-$RUNNER_TEMP/signing.keychain-db}" 2>/dev/null || true
+        rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/notary.p8" \
+              "$RUNNER_TEMP/notarize.zip" "$RUNNER_TEMP/notary.out" "$RUNNER_TEMP/notary.err" 2>/dev/null || true
