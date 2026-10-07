@@ -3,10 +3,19 @@
 # Azure Artifact Signing (Microsoft's cloud signing service, formerly Trusted
 # Signing) holds the certificate in Microsoft's HSM and issues short-lived
 # certificates per signature, so no certificate file or password ever lives
-# in GitHub. The job authenticates to Azure with OpenID Connect: GitHub mints
-# a token for the run, Azure's app registration trusts it through a federated
-# credential, and no client secret exists to leak or rotate. The caller must
-# grant `id-token: write` for that to work.
+# in GitHub. The job authenticates to Azure as an app registration with a
+# client secret, the same shape as the macOS side (a certificate and a notary
+# key held as org secrets). Chosen 2026-10-07 over OIDC federated credentials
+# for simplicity: the default federated credential is one Azure entry per
+# repository, and the org-wide alternatives (an org-level OIDC subject
+# template, or Entra flexible credentials) add a concept nobody here would
+# otherwise touch. Costs: the secret expires (2028-09-29 for the current one,
+# on the app registration "app-signing"; the macOS certificate expires too),
+# and any workflow in any org repo can sign. If the secret leaks, rotate it on
+# the app registration and replace AZURE_CLIENT_SECRET; the app holds only the
+# Certificate Profile Signer role, so that is the whole blast radius. No
+# azure/login step and no `id-token` permission: the signing action takes the
+# credentials directly.
 #
 # Runs on a Windows runner. Signs every file listed, SHA-256 digest, with an
 # RFC 3161 timestamp from Microsoft so the signature outlives the short
@@ -14,15 +23,15 @@
 # way the macOS actions do: a release must never ship an unsigned .exe by
 # accident.
 #
-# Identifiers come from the caller as inputs. They are sentania-labs org
-# secrets scoped to selected repositories: AZURE_TENANT_ID, AZURE_CLIENT_ID,
-# AZURE_SUBSCRIPTION_ID, plus the signing account and certificate profile
-# names (ARTIFACT_SIGNING_ENDPOINT, ARTIFACT_SIGNING_ACCOUNT,
-# ARTIFACT_SIGNING_PROFILE). None of those are secret in themselves; keeping
-# them as secrets means one place to change them for every repo.
+# Credentials and identifiers come from the caller as inputs. They are
+# sentania-labs org secrets visible to all repositories: AZURE_TENANT_ID,
+# AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, plus the signing account and
+# certificate profile names (ARTIFACT_SIGNING_ENDPOINT, ARTIFACT_SIGNING_ACCOUNT,
+# ARTIFACT_SIGNING_PROFILE). Only the client secret is secret in itself;
+# keeping the rest as secrets means one place to change them for every repo.
 
 name: Windows sign
-description: Authenticode-sign files through Azure Artifact Signing with OIDC login.
+description: Authenticode-sign files through Azure Artifact Signing as an app registration (client secret).
 
 inputs:
   files:
@@ -41,10 +50,10 @@ inputs:
     description: secrets.AZURE_TENANT_ID
     required: true
   azure-client-id:
-    description: secrets.AZURE_CLIENT_ID (the app registration with a federated credential for this repo).
+    description: secrets.AZURE_CLIENT_ID (the app registration "app-signing").
     required: true
-  azure-subscription-id:
-    description: secrets.AZURE_SUBSCRIPTION_ID
+  azure-client-secret:
+    description: secrets.AZURE_CLIENT_SECRET (a client secret on that app registration; expires, see the header).
     required: true
 
 runs:
@@ -55,7 +64,7 @@ runs:
       env:
         AZURE_TENANT_ID: ${{ inputs.azure-tenant-id }}
         AZURE_CLIENT_ID: ${{ inputs.azure-client-id }}
-        AZURE_SUBSCRIPTION_ID: ${{ inputs.azure-subscription-id }}
+        AZURE_CLIENT_SECRET: ${{ inputs.azure-client-secret }}
         ENDPOINT: ${{ inputs.endpoint }}
         ACCOUNT: ${{ inputs.signing-account-name }}
         PROFILE: ${{ inputs.certificate-profile-name }}
@@ -65,25 +74,26 @@ runs:
           exit 1
         fi
         missing=""
-        for name in AZURE_TENANT_ID AZURE_CLIENT_ID AZURE_SUBSCRIPTION_ID ENDPOINT ACCOUNT PROFILE; do
+        for name in AZURE_TENANT_ID AZURE_CLIENT_ID AZURE_CLIENT_SECRET ENDPOINT ACCOUNT PROFILE; do
           if [ -z "${!name:-}" ]; then missing="$missing $name"; fi
         done
         if [ -n "$missing" ]; then
           echo "::error::Windows signing inputs with no value:$missing"
-          echo "::error::they are sentania-labs org secrets scoped to selected repositories; add this repository, or do not call windows-sign yet"
+          echo "::error::they are sentania-labs org secrets (visibility: all repositories); check the org secret names, or this run is from a fork or Dependabot (which see no org secrets), or do not call windows-sign yet"
           exit 1
         fi
-
-    - name: Log in to Azure with the run's OIDC token
-      uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
-      with:
-        tenant-id: ${{ inputs.azure-tenant-id }}
-        client-id: ${{ inputs.azure-client-id }}
-        subscription-id: ${{ inputs.azure-subscription-id }}
 
     - name: Sign
       uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
       with:
+        # The action builds a DefaultAzureCredential; with these three set the
+        # environment credential is tried first and a failed login stops there.
+        azure-tenant-id: ${{ inputs.azure-tenant-id }}
+        azure-client-id: ${{ inputs.azure-client-id }}
+        azure-client-secret: ${{ inputs.azure-client-secret }}
+        exclude-azure-cli-credential: true
+        exclude-managed-identity-credential: true
+        exclude-workload-identity-credential: true
         endpoint: ${{ inputs.endpoint }}
         signing-account-name: ${{ inputs.signing-account-name }}
         certificate-profile-name: ${{ inputs.certificate-profile-name }}

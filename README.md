@@ -7,24 +7,50 @@ repo in the org; nothing here releases anything itself.
 
 Sign and notarize release binaries with the org's identities, so a download from
 a GitHub Release runs without Gatekeeper or SmartScreen refusing it. The identities
-are held once, as org secrets with visibility "selected repositories". A repo that
-wants to sign gets added to each secret's repository list (org settings, Secrets and
-variables, Actions, the secret, Repository access); nothing is copied into the repo.
+are held once, as org secrets visible to every repository in the org (2026-10-07,
+Scott: per-repo grants were "secret management hell"). A repo that wants to sign
+calls the actions below; nothing is copied into the repo and nothing is granted.
 
 | piece | what it does | runner |
 |---|---|---|
 | `.github/actions/signing-secrets-present` | fail fast unless all six macOS secrets have a value; run it first, before the build | any |
 | `.github/actions/macos-sign` | import the Developer ID certificate into a throwaway keychain, sign with hardened runtime and timestamp, verify strictly, check the team | macOS |
 | `.github/actions/macos-notarize` | zip, submit to Apple, wait for Accepted (default 2 h), gatekeeper report, remove the keychain | macOS |
-| `.github/actions/windows-sign` | OIDC login to Azure, Authenticode-sign through Azure Artifact Signing, verify | Windows |
+| `.github/actions/windows-sign` | Authenticode-sign through Azure Artifact Signing as the org app registration, verify | Windows |
 | `.github/workflows/notary-diagnostics.yml` | ask Apple about recent submissions and a given id; dispatch here or `workflow_call` | macOS |
 | `.github/workflows/signing-selftest.yml` | build a hello binary, sign, notarize (and Windows on request); proves the secrets without a tag | all |
 
 Secrets, all on the org: `MACOS_CERT_P12` (base64 of the .p12), `MACOS_CERT_PASSWORD`,
 `MACOS_TEAM_ID`, `NOTARY_ISSUER_ID`, `NOTARY_KEY_ID`, `NOTARY_KEY_P8` (base64 of the .p8)
-for macOS; `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_SUBSCRIPTION_ID`,
+for macOS; `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`,
 `ARTIFACT_SIGNING_ENDPOINT`, `ARTIFACT_SIGNING_ACCOUNT`, `ARTIFACT_SIGNING_PROFILE` for
 Windows. A composite action cannot read secrets, so the caller passes them as inputs.
+The Windows client secret expires 2028-09-29 (app registration "app-signing");
+the macOS Developer ID certificate expires 2030. Either expiry fails the release
+loudly at the sign step, so keep both dates on the calendar. With all-repos
+visibility, any workflow in any org repo can sign; if a secret leaks, rotate it at
+the source (the Azure app registration, or Apple) and replace the org secret.
+
+### Onboarding a repo
+
+Nothing to request and nothing to grant: the secrets are already visible to every
+repo in the org. In the repo's release workflow (the one that runs on a `vX.Y.Z`
+tag):
+
+1. Before the build, call `signing-secrets-present` so a missing secret fails in
+   seconds rather than after a 20-minute build.
+2. After the binary exists, call `macos-sign` then `macos-notarize` on macOS
+   runners and `windows-sign` on Windows runners. Run the repo's own smoke test
+   between sign and notarize, on the signed binary, so a signature that breaks
+   startup is caught before Apple's round trip.
+3. Pin every `uses:` to a commit SHA of this repo, with a comment naming the date,
+   and bump the SHA deliberately. Never `@main`.
+4. Prove it before the first tag: dispatch `signing-selftest.yml` here (Windows leg
+   on) if the org secrets have not been exercised recently, then cut the tag and
+   check the release assets with `codesign -dv` / `spctl -a` and
+   `Get-AuthenticodeSignature`.
+5. Delete any repo-level signing secrets or hand-rolled signing steps the repo
+   had before. A repo secret with the same name silently overrides the org one.
 
 Consume by commit SHA, not by branch, from a release workflow:
 
@@ -67,7 +93,7 @@ jobs:
       - if: always() && runner.os == 'macOS'
         run: security delete-keychain "${KEYCHAIN:-$RUNNER_TEMP/signing.keychain-db}" 2>/dev/null || true
       - uses: sentania-labs/.github/.github/actions/windows-sign@<sha>
-        if: runner.os == 'Windows'   # the job needs permissions: id-token: write
+        if: runner.os == 'Windows'
         with:
           files: ${{ github.workspace }}\dist\<binary>.exe   # absolute paths
           endpoint: ${{ secrets.ARTIFACT_SIGNING_ENDPOINT }}
@@ -75,7 +101,7 @@ jobs:
           certificate-profile-name: ${{ secrets.ARTIFACT_SIGNING_PROFILE }}
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          azure-subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
 ```
 
 Things worth knowing:
