@@ -16,7 +16,62 @@ name: Signing self-test
 on:
   workflow_dispatch:
     inputs:
-      windows:
+      macos-bundle:
+    needs: secrets
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build a throwaway .app with nested code
+        run: |
+          APP="dist/Hello Bundle.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks"
+          printf '#include <stdio.h>\nint main(void){puts("hello from sentania-labs bundle self-test");return 0;}\n' > hello.c
+          clang -o "$APP/Contents/MacOS/hello-bundle" hello.c
+          printf 'int answer(void){return 42;}\n' > lib.c
+          clang -dynamiclib -o "$APP/Contents/Frameworks/libanswer.dylib" lib.c
+          cat > "$APP/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+          <key>CFBundleExecutable</key><string>hello-bundle</string>
+          <key>CFBundleIdentifier</key><string>net.sentania.selftest.hello</string>
+          <key>CFBundleName</key><string>Hello Bundle</string>
+          <key>CFBundlePackageType</key><string>APPL</string>
+          <key>CFBundleVersion</key><string>1</string>
+          <key>CFBundleShortVersionString</key><string>1.0</string>
+          </dict></plist>
+          PLIST
+          "$APP/Contents/MacOS/hello-bundle"
+
+      - name: Sign
+        uses: ./.github/actions/macos-sign
+        with:
+          bundle: dist/Hello Bundle.app
+          macos-cert-p12: ${{ secrets.MACOS_CERT_P12 }}
+          macos-cert-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+          macos-team-id: ${{ secrets.MACOS_TEAM_ID }}
+
+      - name: The signed bundle still runs
+        run: "dist/Hello Bundle.app/Contents/MacOS/hello-bundle"
+
+      - name: Notarize and staple
+        id: notarize
+        uses: ./.github/actions/macos-notarize
+        with:
+          bundle: dist/Hello Bundle.app
+          output-zip: dist/Hello-Bundle.zip
+          notary-issuer-id: ${{ secrets.NOTARY_ISSUER_ID }}
+          notary-key-id: ${{ secrets.NOTARY_KEY_ID }}
+          notary-key-p8: ${{ secrets.NOTARY_KEY_P8 }}
+
+      - name: The release zip unpacks to a stapled, Gatekeeper-clean app
+        run: |
+          mkdir -p verify && ditto -x -k "${{ steps.notarize.outputs.zip }}" verify
+          xcrun stapler validate "verify/Hello Bundle.app"
+          spctl -a -t exec -vv "verify/Hello Bundle.app"
+
+  windows:
         description: "Also run the Windows (Azure Artifact Signing) leg"
         required: false
         type: boolean

@@ -8,12 +8,13 @@
 # macOS binary nobody can run is the problem this exists to fix). Recovery is
 # `gh run rerun <run-id> --failed` against the same tag.
 #
-# The ticket is NOT stapled, because a ticket can only be stapled to a bundle
-# (.app, .dmg, .pkg) and most callers ship a bare executable. The first run on
-# a given Mac asks Apple about the binary over the network; anyone who just
-# downloaded it from a GitHub release is online. An offline machine would need
-# a signed .pkg, which needs a Developer ID Installer certificate the org does
-# not hold.
+# Two modes. `binary` (a bare executable): the ticket is NOT stapled, because a
+# ticket can only be stapled to a bundle (.app, .dmg, .pkg). The first run on a
+# given Mac asks Apple about the binary over the network. `bundle` (a .app
+# signed by macos-sign in bundle mode): the ticket IS stapled, the staple is
+# validated, Gatekeeper must accept the app (a hard gate, not advisory), and
+# the release zip is rebuilt from the stapled app (`ditto -c -k --keepParent`)
+# at `output-zip`. Ship that zip, not the one used for submission.
 #
 # Secrets come from the caller as inputs: NOTARY_ISSUER_ID, NOTARY_KEY_ID,
 # NOTARY_KEY_P8 (base64 of the App Store Connect API key .p8).
@@ -23,8 +24,20 @@ description: Submit a signed binary to Apple's notary service and fail unless it
 
 inputs:
   binary:
-    description: Path of the signed Mach-O to notarize.
-    required: true
+    description: Path of the signed bare Mach-O to notarize. Exactly one of binary or bundle.
+    required: false
+    default: ""
+  bundle:
+    description: Path of the signed .app to notarize and staple. Exactly one of binary or bundle.
+    required: false
+    default: ""
+  output-zip:
+    description: >
+      Bundle mode only: where to write the final zip, built after stapling.
+      Defaults to the bundle path with .zip appended to its name (dist/X.app
+      becomes dist/X.app.zip).
+    required: false
+    default: ""
   timeout:
     description: >
       How long to wait for Apple's verdict (notarytool --timeout syntax). On
@@ -50,6 +63,9 @@ outputs:
   seconds:
     description: Round-trip time in seconds.
     value: ${{ steps.notarize.outputs.seconds }}
+  zip:
+    description: Bundle mode only, the stapled release zip path.
+    value: ${{ steps.notarize.outputs.zip }}
 
 runs:
   using: composite
@@ -59,6 +75,8 @@ runs:
       shell: bash
       env:
         BIN: ${{ inputs.binary }}
+        BUNDLE: ${{ inputs.bundle }}
+        OUTPUT_ZIP: ${{ inputs.output-zip }}
         TIMEOUT: ${{ inputs.timeout }}
         NOTARY_ISSUER_ID: ${{ inputs.notary-issuer-id }}
         NOTARY_KEY_ID: ${{ inputs.notary-key-id }}
@@ -73,13 +91,32 @@ runs:
           echo "::error::NOTARY_ISSUER_ID / NOTARY_KEY_ID / NOTARY_KEY_P8 have no value; is this repository on the org secrets' repository list?"
           exit 1
         fi
-        [ -e "$BIN" ] || { echo "::error::no such file to notarize: $BIN"; exit 1; }
+        if [ -n "$BIN" ] && [ -n "$BUNDLE" ]; then
+          echo "::error::pass exactly one of binary or bundle, not both"; exit 1
+        fi
+        if [ -z "$BIN" ] && [ -z "$BUNDLE" ]; then
+          echo "::error::pass one of binary or bundle"; exit 1
+        fi
+        if [ -n "$BUNDLE" ]; then
+          BUNDLE="${BUNDLE%/}"
+          [ -d "$BUNDLE" ] || { echo "::error::no such bundle to notarize: $BUNDLE"; exit 1; }
+          TARGET="$BUNDLE"
+        else
+          [ -e "$BIN" ] || { echo "::error::no such file to notarize: $BIN"; exit 1; }
+          TARGET="$BIN"
+        fi
         printf '%s' "$NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
         # notarytool only accepts an archive, never a bare executable, so the
         # binary is zipped for submission. Apple notarizes what is inside;
         # the zip is thrown away and the caller still ships the binary, which
         # now carries a signature Apple has vouched for.
-        /usr/bin/ditto -c -k "$BIN" "$RUNNER_TEMP/notarize.zip"
+        # A bundle needs --keepParent so the .app directory is the zip root.
+        rm -f "$RUNNER_TEMP/notarize.zip"
+        if [ -n "$BUNDLE" ]; then
+          /usr/bin/ditto -c -k --keepParent "$BUNDLE" "$RUNNER_TEMP/notarize.zip"
+        else
+          /usr/bin/ditto -c -k "$BIN" "$RUNNER_TEMP/notarize.zip"
+        fi
         started=$(date +%s)
         set +e
         xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
@@ -152,14 +189,30 @@ runs:
             ;;
         esac
         rm -f "$RUNNER_TEMP/notary.p8"
-        # Reporting, not a gate. A local Gatekeeper assessment of an unstapled
-        # binary is an online lookup whose answer is not reliably servable the
-        # moment notarization finishes, and `spctl --status` can be off on a
-        # runner image. It runs because the output is useful when something
-        # is wrong.
-        echo "--- gatekeeper assessment (advisory) ---"
-        spctl -a -t exec -vv "$BIN" 2>&1 || echo "::warning::spctl did not accept the binary; notarization itself reported Accepted"
-        codesign --verify --strict --test-requirement="=notarized" --verbose=2 "$BIN" 2>&1 || echo "::warning::the notarization requirement did not verify locally; this can be Apple-side propagation"
+        if [ -n "$BUNDLE" ]; then
+          # A stapled bundle is verifiable offline, so these are gates.
+          xcrun stapler staple "$BUNDLE"
+          xcrun stapler validate "$BUNDLE"
+          codesign --verify --deep --strict --verbose=2 "$BUNDLE"
+          spctl -a -t exec -vv "$BUNDLE"
+          codesign --verify --strict --test-requirement="=notarized" --verbose=2 "$BUNDLE"
+          # The release asset is rebuilt AFTER stapling; the submission zip
+          # has no ticket in it.
+          OUT="${OUTPUT_ZIP:-$BUNDLE.zip}"
+          rm -f "$OUT"
+          /usr/bin/ditto -c -k --keepParent "$BUNDLE" "$OUT"
+          echo "zip=$OUT" >> "$GITHUB_OUTPUT"
+          echo "stapled release zip: $OUT"
+        else
+          # Reporting, not a gate. A local Gatekeeper assessment of an unstapled
+          # binary is an online lookup whose answer is not reliably servable the
+          # moment notarization finishes, and `spctl --status` can be off on a
+          # runner image. It runs because the output is useful when something
+          # is wrong.
+          echo "--- gatekeeper assessment (advisory) ---"
+          spctl -a -t exec -vv "$BIN" 2>&1 || echo "::warning::spctl did not accept the binary; notarization itself reported Accepted"
+          codesign --verify --strict --test-requirement="=notarized" --verbose=2 "$BIN" 2>&1 || echo "::warning::the notarization requirement did not verify locally; this can be Apple-side propagation"
+        fi
 
     - name: Remove the signing keychain and key material
       if: always()
