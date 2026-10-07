@@ -31,6 +31,27 @@ loudly at the sign step, so keep both dates on the calendar. With all-repos
 visibility, any workflow in any org repo can sign; if a secret leaks, rotate it at
 the source (the Azure app registration, or Apple) and replace the org secret.
 
+### Onboarding a repo
+
+Nothing to request and nothing to grant: the secrets are already visible to every
+repo in the org. In the repo's release workflow (the one that runs on a `vX.Y.Z`
+tag):
+
+1. Before the build, call `signing-secrets-present` so a missing secret fails in
+   seconds rather than after a 20-minute build.
+2. After the binary exists, call `macos-sign` then `macos-notarize` on macOS
+   runners and `windows-sign` on Windows runners. Run the repo's own smoke test
+   between sign and notarize, on the signed binary, so a signature that breaks
+   startup is caught before Apple's round trip.
+3. Pin every `uses:` to a commit SHA of this repo, with a comment naming the date,
+   and bump the SHA deliberately. Never `@main`.
+4. Prove it before the first tag: dispatch `signing-selftest.yml` here (Windows leg
+   on) if the org secrets have not been exercised recently, then cut the tag and
+   check the release assets with `codesign -dv` / `spctl -a` and
+   `Get-AuthenticodeSignature`.
+5. Delete any repo-level signing secrets or hand-rolled signing steps the repo
+   had before. A repo secret with the same name silently overrides the org one.
+
 Consume by commit SHA, not by branch, from a release workflow:
 
 ```yaml
