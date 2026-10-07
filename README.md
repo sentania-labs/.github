@@ -17,6 +17,7 @@ calls the actions below; nothing is copied into the repo and nothing is granted.
 | `.github/actions/macos-sign` | import the Developer ID certificate into a throwaway keychain, sign with hardened runtime and timestamp, verify strictly, check the team | macOS |
 | `.github/actions/macos-notarize` | zip, submit to Apple, wait for Accepted (default 2 h), gatekeeper report, remove the keychain | macOS |
 | `.github/actions/windows-sign` | Authenticode-sign through Azure Artifact Signing as the org app registration, verify | Windows |
+| `.github/actions/attest-provenance` | GitHub artifact attestation (signed build provenance) for the final release files; `gh attestation verify <file> --owner sentania-labs` checks it. Covers Linux, which has no OS signing gate. PUBLIC repos only on the org's Team plan (the action checks and says so) | any |
 | `.github/workflows/notary-diagnostics.yml` | ask Apple about recent submissions and a given id; dispatch here or `workflow_call` | macOS |
 | `.github/workflows/signing-selftest.yml` | build a hello binary, sign, notarize (and Windows on request); proves the secrets without a tag | all |
 
@@ -43,13 +44,19 @@ tag):
    runners and `windows-sign` on Windows runners. Run the repo's own smoke test
    between sign and notarize, on the signed binary, so a signature that breaks
    startup is caught before Apple's round trip.
-3. Pin every `uses:` to a commit SHA of this repo, with a comment naming the date,
+3. Public repo only: after every file is final (signed where it gets signed),
+   call `attest-provenance` once on all of them. The job needs `id-token: write`
+   and `attestations: write`. Attest the files that ship, not an earlier copy:
+   the attestation is a digest. A private repo skips this step; GitHub sells
+   attestations for private repos only with Enterprise Cloud, and the action
+   refuses with that message rather than failing upstream after the build.
+4. Pin every `uses:` to a commit SHA of this repo, with a comment naming the date,
    and bump the SHA deliberately. Never `@main`.
-4. Prove it before the first tag: dispatch `signing-selftest.yml` here (Windows leg
+5. Prove it before the first tag: dispatch `signing-selftest.yml` here (Windows leg
    on) if the org secrets have not been exercised recently, then cut the tag and
    check the release assets with `codesign -dv` / `spctl -a` and
    `Get-AuthenticodeSignature`.
-5. Delete any repo-level signing secrets or hand-rolled signing steps the repo
+6. Delete any repo-level signing secrets or hand-rolled signing steps the repo
    had before. A repo secret with the same name silently overrides the org one.
 
 Consume by commit SHA, not by branch, from a release workflow:
@@ -70,6 +77,10 @@ jobs:
           notary-key-p8: ${{ secrets.NOTARY_KEY_P8 }}
 
   binaries:
+    permissions:
+      contents: read
+      id-token: write        # attest-provenance
+      attestations: write    # attest-provenance
     # ... build dist/<binary> on a macOS runner, then:
       - uses: sentania-labs/.github/.github/actions/macos-sign@<sha>
         if: runner.os == 'macOS'
@@ -102,6 +113,11 @@ jobs:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
           azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+      # Last, once nothing else will change the files. Public repo only;
+      # needs the two permissions on the job above.
+      - uses: sentania-labs/.github/.github/actions/attest-provenance@<sha>
+        with:
+          subject-path: dist/*
 ```
 
 ### macOS bundle mode (.app)
