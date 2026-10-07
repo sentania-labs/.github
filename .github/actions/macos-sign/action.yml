@@ -24,8 +24,17 @@ description: Sign a binary with the Developer ID Application identity, hardened 
 
 inputs:
   binary:
-    description: Path of the Mach-O to sign (a bare executable or an app bundle).
-    required: true
+    description: Path of a bare Mach-O executable to sign. Exactly one of binary or bundle.
+    required: false
+    default: ""
+  bundle:
+    description: >
+      Path of a .app bundle to sign. Nested code (dylibs, .so, frameworks, helper
+      executables, XPC services, inner apps) is signed first, deepest first, then
+      the bundle itself; --deep is never used for signing. Exactly one of binary
+      or bundle.
+    required: false
+    default: ""
   entitlements:
     description: >
       Entitlements plist. Defaults to this action's plist, which disables library
@@ -109,45 +118,109 @@ runs:
       shell: bash
       env:
         BIN: ${{ inputs.binary }}
+        BUNDLE: ${{ inputs.bundle }}
         ENTITLEMENTS: ${{ inputs.entitlements }}
         MACOS_TEAM_ID: ${{ inputs.macos-team-id }}
       run: |
         set -euo pipefail
-        [ -e "$BIN" ] || { echo "::error::no such file to sign: $BIN"; exit 1; }
+        if [ -n "$BIN" ] && [ -n "$BUNDLE" ]; then
+          echo "::error::pass exactly one of binary or bundle, not both"; exit 1
+        fi
+        if [ -z "$BIN" ] && [ -z "$BUNDLE" ]; then
+          echo "::error::pass one of binary or bundle"; exit 1
+        fi
+        TARGET="${BIN:-$BUNDLE}"
+        [ -e "$TARGET" ] || { echo "::error::no such file to sign: $TARGET"; exit 1; }
+        if [ -n "$BUNDLE" ]; then
+          case "$BUNDLE" in *.app|*.app/) ;; *) echo "::error::bundle must be a .app directory: $BUNDLE"; exit 1;; esac
+          [ -d "$BUNDLE" ] || { echo "::error::bundle is not a directory: $BUNDLE"; exit 1; }
+        fi
         ENT="${ENTITLEMENTS:-${{ github.action_path }}/entitlements-disable-library-validation.plist}"
         [ -f "$ENT" ] || { echo "::error::entitlements file not found: $ENT"; exit 1; }
-        # --options runtime is the hardened runtime, which notarization
-        # requires. --timestamp gets a trusted timestamp from Apple, without
-        # which the signature stops verifying the day the certificate
-        # expires rather than remaining valid for what was signed while it
-        # was live.
-        codesign --force --sign "$SIGN_ID" \
-          --options runtime \
-          --entitlements "$ENT" \
-          --timestamp \
-          "$BIN"
-        # --strict matters specifically here: a PyInstaller one-file binary
-        # is a Mach-O with an archive glued onto the end of it, and a
-        # non-strict verify is happy with things Apple's notary service is
-        # not. Without it, the cheap check passes and the slow one fails.
-        codesign --verify --strict --verbose=2 "$BIN"
-        codesign --display --verbose=4 "$BIN" 2>&1 | grep -E 'Authority|TeamIdentifier|flags=' || true
+
+        if [ -n "$BUNDLE" ]; then
+          BUNDLE="${BUNDLE%/}"
+          # Nested code first, deepest path first, so every container is
+          # signed after what it contains and its seal covers the final
+          # children. --deep would sign in the wrong order and apply one set
+          # of options to everything, so it is used only to VERIFY. Mach-O
+          # detection is by content (file(1)), not extension: PyInstaller
+          # ships extension modules as .so and plain executables with none.
+          # Inner .app/.framework/.xpc directories are signed as bundles
+          # (their own main executable is signed by that call).
+          # Nested items get no entitlements; the main app gets the plist.
+          # The app's own main executable (Info.plist CFBundleExecutable) is
+          # left to the final bundle signature so it picks up the entitlements.
+          MAIN_EXE="$BUNDLE/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$BUNDLE/Contents/Info.plist")"
+          [ -f "$MAIN_EXE" ] || { echo "::error::CFBundleExecutable not found at $MAIN_EXE"; exit 1; }
+          list="$RUNNER_TEMP/nested.list"
+          : > "$list"
+          while IFS= read -r -d '' f; do
+            [ "$f" = "$MAIN_EXE" ] && continue
+            [ -L "$f" ] && continue
+            if file -b "$f" | grep -q 'Mach-O'; then printf '%s\0' "$f" >> "$list"; fi
+          done < <(find "$BUNDLE/Contents" -type f -print0)
+          while IFS= read -r -d '' d; do
+            printf '%s\0' "$d" >> "$list"
+          done < <(find "$BUNDLE/Contents" -type d \( -name '*.app' -o -name '*.framework' -o -name '*.xpc' -o -name '*.appex' -o -name '*.bundle' -o -name '*.plugin' \) -print0)
+          # Sort by path depth, deepest first.
+          python3 - "$list" <<'PY'
+        import sys
+        p = sys.argv[1]
+        items = [x for x in open(p, 'rb').read().split(b'\0') if x]
+        items.sort(key=lambda x: (-x.count(b'/'), x))
+        open(p, 'wb').write(b'\0'.join(items) + (b'\0' if items else b''))
+        PY
+          n=0
+          while IFS= read -r -d '' f; do
+            codesign --force --sign "$SIGN_ID" --options runtime --timestamp "$f"
+            n=$((n+1))
+          done < "$list"
+          rm -f "$list"
+          echo "signed $n nested item(s)"
+          codesign --force --sign "$SIGN_ID" \
+            --options runtime \
+            --entitlements "$ENT" \
+            --timestamp \
+            "$BUNDLE"
+          # --deep is correct here: as a verifier it walks every nested
+          # item, which is the check that signing inside out worked.
+          codesign --verify --deep --strict --verbose=2 "$BUNDLE"
+          TARGET="$BUNDLE"
+        else
+          # --options runtime is the hardened runtime, which notarization
+          # requires. --timestamp gets a trusted timestamp from Apple, without
+          # which the signature stops verifying the day the certificate
+          # expires rather than remaining valid for what was signed while it
+          # was live.
+          codesign --force --sign "$SIGN_ID" \
+            --options runtime \
+            --entitlements "$ENT" \
+            --timestamp \
+            "$TARGET"
+          # --strict matters specifically here: a PyInstaller one-file binary
+          # is a Mach-O with an archive glued onto the end of it, and a
+          # non-strict verify is happy with things Apple's notary service is
+          # not. Without it, the cheap check passes and the slow one fails.
+          codesign --verify --strict --verbose=2 "$TARGET"
+        fi
+        codesign --display --verbose=4 "$TARGET" 2>&1 | grep -E 'Authority|TeamIdentifier|flags=' || true
         # Notarization rejects anything without the hardened runtime, and it
         # rejects it after a slow round trip. Catch a missing flag here.
-        if ! codesign --display --verbose=4 "$BIN" 2>&1 | grep -qE 'flags=.*runtime'; then
-          echo "::error::the signed binary does not carry the hardened runtime flag"
+        if ! codesign --display --verbose=4 "$TARGET" 2>&1 | grep -qE 'flags=.*runtime'; then
+          echo "::error::the signed target does not carry the hardened runtime flag"
           exit 1
         fi
         # The signature must carry the team this org releases under. A
         # certificate swapped for a different team's would still sign, still
         # notarize, and still run, and nobody would notice until someone
         # asked who published the thing.
-        signed_team="$(codesign --display --verbose=4 "$BIN" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+        signed_team="$(codesign --display --verbose=4 "$TARGET" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
         if [ "$signed_team" != "$MACOS_TEAM_ID" ]; then
           echo "::error::signed under team '$signed_team', expected '$MACOS_TEAM_ID'"
           exit 1
         fi
-        echo "signed $BIN under team $signed_team"
+        echo "signed $TARGET under team $signed_team"
 
     - name: Remove the keychain if signing failed
       if: failure()

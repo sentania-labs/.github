@@ -104,11 +104,49 @@ jobs:
           azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
 ```
 
+### macOS bundle mode (.app)
+
+`macos-sign` and `macos-notarize` each take `bundle:` (a `.app` path) instead of
+`binary:`; pass exactly one. The bare-binary path is unchanged.
+
+- `macos-sign bundle:` signs every nested Mach-O, `.framework`, `.xpc` and inner
+  `.app` under `Contents/`, deepest first, with hardened runtime and timestamp
+  (never `--deep` for signing), then signs the bundle with the entitlements
+  (default: disable-library-validation; override with `entitlements:`). It then
+  runs `codesign --verify --deep --strict`, and checks the runtime flag and team.
+  The app's `CFBundleExecutable` must exist under `Contents/MacOS/`.
+- `macos-notarize bundle:` zips with `ditto -c -k --keepParent`, submits, and on
+  Accepted runs `stapler staple` and `stapler validate`, then hard-gates on
+  `codesign --verify --deep --strict`, `spctl -a -t exec -vv` and
+  `--test-requirement="=notarized"`. It then rebuilds the release zip from the
+  stapled app at `output-zip` (default `<bundle>.zip`) and returns it as output
+  `zip`. Upload that zip, never the submission zip.
+- Run the caller's smoke test between sign and notarize against
+  `<bundle>/Contents/MacOS/<exe>`.
+
+```yaml
+      - uses: sentania-labs/.github/.github/actions/macos-sign@<sha>
+        with:
+          bundle: dist/My App.app
+          macos-cert-p12: ${{ secrets.MACOS_CERT_P12 }}
+          macos-cert-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+          macos-team-id: ${{ secrets.MACOS_TEAM_ID }}
+      - id: notarize
+        uses: sentania-labs/.github/.github/actions/macos-notarize@<sha>
+        with:
+          bundle: dist/My App.app
+          output-zip: dist/My-App-macos-arm64.zip
+          notary-issuer-id: ${{ secrets.NOTARY_ISSUER_ID }}
+          notary-key-id: ${{ secrets.NOTARY_KEY_ID }}
+          notary-key-p8: ${{ secrets.NOTARY_KEY_P8 }}
+      # release asset: ${{ steps.notarize.outputs.zip }}
+```
+
 Things worth knowing:
 
-- The macOS ticket is not stapled (a ticket staples only to a bundle), so the
-  first run on a Mac asks Apple online. An offline target would need a signed
-  .pkg and a Developer ID Installer certificate the org does not hold.
+- A bare-binary macOS ticket is not stapled (a ticket staples only to a bundle), so
+  the first run on a Mac asks Apple online. Ship a `.app` and use bundle mode to
+  get a stapled, offline-verifiable result (next section).
 - A release that signs depends on Apple. When notarization is slow the release
   fails and nothing ships, on purpose; rerun the failed jobs against the same
   tag once the diagnostics workflow shows the submission Accepted.
