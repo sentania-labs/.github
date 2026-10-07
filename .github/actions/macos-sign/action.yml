@@ -162,7 +162,7 @@ runs:
           done < <(find "$BUNDLE/Contents" -type f -print0)
           while IFS= read -r -d '' d; do
             printf '%s\0' "$d" >> "$list"
-          done < <(find "$BUNDLE/Contents" -type d \( -name '*.app' -o -name '*.framework' -o -name '*.xpc' \) -print0)
+          done < <(find "$BUNDLE/Contents" -type d \( -name '*.app' -o -name '*.framework' -o -name '*.xpc' -o -name '*.appex' -o -name '*.bundle' -o -name '*.plugin' \) -print0)
           # Sort by path depth, deepest first.
           python3 - "$list" <<'PY'
         import sys
