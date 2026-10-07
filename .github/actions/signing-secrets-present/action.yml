@@ -57,7 +57,7 @@ runs:
         done
         if [ -n "$missing" ]; then
           echo "::error::signing secrets with no value in this repository:$missing"
-          echo "::error::they are sentania-labs org secrets scoped to selected repositories; add this repository to each, or a release would ship a macOS binary nobody can run"
+          echo "::error::they are sentania-labs org secrets (visibility: all repositories); check the org secret names, or this run is from a fork or Dependabot (which see no org secrets); otherwise a release would ship a macOS binary nobody can run"
           exit 1
         fi
         echo "all six signing secrets are present"

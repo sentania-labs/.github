@@ -5,8 +5,8 @@
 # org secrets are present and correct and the actions behave; a consumer
 # repo's release can then only fail on something of its own.
 #
-# Run by hand from the Actions tab. The Windows leg is opt-in until the Azure
-# Artifact Signing account exists (Scott, 2026-09-30: setting it up).
+# Run by hand from the Actions tab. The Windows leg is opt-in (it costs a
+# signature against the org's Artifact Signing account each time).
 #
 # Placement (github-ci skill): GitHub-hosted, because it needs macOS and
 # Windows runners; free on this public repo.
@@ -88,7 +88,6 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: read
-      id-token: write   # OIDC login to Azure
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -111,7 +110,7 @@ jobs:
           certificate-profile-name: ${{ secrets.ARTIFACT_SIGNING_PROFILE }}
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          azure-subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
 
       - name: The signed binary still runs
         shell: pwsh
