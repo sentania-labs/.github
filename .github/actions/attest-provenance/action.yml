@@ -1,0 +1,117 @@
+# Record signed build provenance for release files (GitHub artifact attestations).
+#
+# Code signing (macos-sign, windows-sign) satisfies the OS: Gatekeeper and
+# Defender will run the binary. It says nothing about WHERE the binary came
+# from, and Linux has no gate at all. An attestation fills that gap for every
+# platform: GitHub signs a statement, through Sigstore with its own identity,
+# that this exact file (by digest) was built by this workflow, at this commit,
+# in this repository. No key material exists anywhere; nothing expires on our
+# side. A downloader verifies with
+#
+#   gh attestation verify <file> --repo sentania-labs/<repo>
+#
+# which checks the digest against the attestations GitHub stores for THAT
+# repository. `--owner sentania-labs` also works but accepts an attestation
+# from any repo in the org, so a release page should document `--repo`.
+#
+# Call it ONCE per job on every file the release ships, after the files are
+# final (signed, if they get signed; attesting before signing records a digest
+# that no longer matches the download). The calling job needs
+#
+#   permissions:
+#     id-token: write        # Sigstore identity for the run
+#     attestations: write    # store the attestation on the repo
+#     contents: read
+#
+# A composite action cannot declare permissions, so this fails loudly, before
+# the upstream action does, when the id-token permission is missing: the
+# runner exposes ACTIONS_ID_TOKEN_REQUEST_URL only when it is granted.
+#
+# PUBLIC REPOSITORIES ONLY on this org's plan. GitHub offers artifact
+# attestations on private and internal repositories only with Enterprise
+# Cloud; sentania-labs is on Team. This action checks the repository's
+# visibility first and stops with that reason, so a private consumer learns
+# it at the top of the step rather than from an upstream 403 after a full
+# build. Signing (macos-sign, windows-sign) is unaffected by visibility.
+#
+# Adopted 2026-10-07 (Scott: "let's add that attestation in ... make this part
+# of the shared action stuff"). Two org container repos already attest image
+# digests inline; this is the file-subject variant for release binaries.
+
+name: Attest provenance
+description: Create a GitHub artifact attestation (signed build provenance) for release files.
+
+inputs:
+  subject-path:
+    description: Files to attest, one path or glob per line (e.g. dist/*). Must be the FINAL files that ship.
+    required: true
+  show-summary:
+    description: Write the attestation summary to the job summary page.
+    required: false
+    default: "true"
+  github-token:
+    description: Token used to read the repository's visibility. The default is the run's own token.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  bundle-path:
+    description: Path to the Sigstore bundle written by the upstream action.
+    value: ${{ steps.attest.outputs.bundle-path }}
+  attestation-url:
+    description: URL of the stored attestation.
+    value: ${{ steps.attest.outputs.attestation-url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Refuse to run on a private repository, without the id-token permission, or without files
+      shell: bash
+      env:
+        SUBJECT: ${{ inputs.subject-path }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        visibility="$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility 2>/dev/null || echo unknown)"
+        if [ "$visibility" != "public" ]; then
+          echo "::error::attest-provenance: $GITHUB_REPOSITORY is '$visibility'. GitHub artifact attestations need Enterprise Cloud for private and internal repositories (this org is on Team); remove this step from the release workflow of a private repo, or make the repo public"
+          exit 1
+        fi
+        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+          echo "::error::attest-provenance needs 'permissions: id-token: write' (and 'attestations: write') on the calling job"
+          exit 1
+        fi
+        if [ -z "${SUBJECT//[[:space:]]/}" ]; then
+          echo "::error::attest-provenance: subject-path is empty"
+          exit 1
+        fi
+        # Every include entry (newline or comma separated, like upstream) must
+        # match at least one REGULAR FILE, or the attestation would silently
+        # cover less than the release ships. nullglob alone does not catch a
+        # missing literal path (it stays in the array as a literal), hence the
+        # -f test. Exclusion entries (leading "!") are upstream's business and
+        # are skipped here. macOS ships bash 3.2 without globstar, so "**"
+        # entries are passed through unchecked rather than failing.
+        shopt -s nullglob
+        globstar_ok=0; shopt -s globstar 2>/dev/null && globstar_ok=1
+        while IFS= read -r entry; do
+          entry="${entry#"${entry%%[![:space:]]*}"}"; entry="${entry%"${entry##*[![:space:]]}"}"
+          [ -z "$entry" ] && continue
+          case "$entry" in '!'*) echo "exclusion (not pre-checked): $entry"; continue;; esac
+          if [ "$globstar_ok" -eq 0 ] && [[ "$entry" == *'**'* ]]; then echo "not pre-checked (no globstar in this bash): $entry"; continue; fi
+          found=0
+          # shellcheck disable=SC2206  # the glob expansion is the point
+          for f in $entry; do
+            if [ -f "$f" ]; then echo "attesting: $f"; found=1; fi
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "::error::attest-provenance: no regular file matches '$entry' (paths with spaces are not supported here; attest from a directory glob instead)"
+            exit 1
+          fi
+        done < <(printf '%s\n' "$SUBJECT" | tr ',' '\n')
+
+    - name: Attest
+      id: attest
+      uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+      with:
+        subject-path: ${{ inputs.subject-path }}
+        show-summary: ${{ inputs.show-summary }}

@@ -50,6 +50,10 @@ jobs:
           - os: macos-15-intel      # current Intel image (macos-13 is retired)
             name: x86_64
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write       # attest-provenance (Sigstore identity)
+      attestations: write   # attest-provenance (store on the repo)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -80,12 +84,26 @@ jobs:
           notary-key-id: ${{ secrets.NOTARY_KEY_ID }}
           notary-key-p8: ${{ secrets.NOTARY_KEY_P8 }}
 
+      - name: Attest provenance
+        uses: ./.github/actions/attest-provenance
+        with:
+          subject-path: dist/hello-${{ matrix.name }}
+
+      - name: Verify the attestation the way a downloader would
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh attestation verify dist/hello-${{ matrix.name }} --repo ${{ github.repository }}
+
       - name: Result
         run: echo "notarized in ${{ steps.notarize.outputs.seconds }}s (submission ${{ steps.notarize.outputs.submission-id }})"
 
   macos-bundle:
     needs: secrets
     runs-on: macos-latest
+    permissions:
+      contents: read
+      id-token: write       # attest-provenance (Sigstore identity)
+      attestations: write   # attest-provenance (store on the repo)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -138,11 +156,23 @@ jobs:
           xcrun stapler validate "verify/Hello Bundle.app"
           spctl -a -t exec -vv "verify/Hello Bundle.app"
 
+      - name: Attest provenance of the release zip
+        uses: ./.github/actions/attest-provenance
+        with:
+          subject-path: ${{ steps.notarize.outputs.zip }}
+
+      - name: Verify the attestation the way a downloader would
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh attestation verify "${{ steps.notarize.outputs.zip }}" --repo ${{ github.repository }}
+
   windows:
     if: inputs.windows
     runs-on: windows-latest
     permissions:
       contents: read
+      id-token: write       # attest-provenance (Sigstore identity)
+      attestations: write   # attest-provenance (store on the repo)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -170,3 +200,14 @@ jobs:
       - name: The signed binary still runs
         shell: pwsh
         run: .\dist\hello.exe
+
+      - name: Attest provenance
+        uses: ./.github/actions/attest-provenance
+        with:
+          subject-path: dist/hello.exe
+
+      - name: Verify the attestation the way a downloader would
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh attestation verify dist\hello.exe --repo ${{ github.repository }}
