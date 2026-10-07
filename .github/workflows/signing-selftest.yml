@@ -120,7 +120,7 @@ jobs:
           macos-team-id: ${{ secrets.MACOS_TEAM_ID }}
 
       - name: The signed bundle still runs
-        run: "dist/Hello Bundle.app/Contents/MacOS/hello-bundle"
+        run: ./dist/Hello\ Bundle.app/Contents/MacOS/hello-bundle
 
       - name: Notarize and staple
         id: notarize
