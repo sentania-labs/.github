@@ -17,7 +17,7 @@ calls the actions below; nothing is copied into the repo and nothing is granted.
 | `.github/actions/macos-sign` | import the Developer ID certificate into a throwaway keychain, sign with hardened runtime and timestamp, verify strictly, check the team | macOS |
 | `.github/actions/macos-notarize` | zip, submit to Apple, wait for Accepted (default 2 h), gatekeeper report, remove the keychain | macOS |
 | `.github/actions/windows-sign` | Authenticode-sign through Azure Artifact Signing as the org app registration, verify | Windows |
-| `.github/actions/attest-provenance` | GitHub artifact attestation (signed build provenance) for the final release files; `gh attestation verify <file> --owner sentania-labs` checks it. Covers Linux, which has no OS signing gate. PUBLIC repos only on the org's Team plan (the action checks and says so) | any |
+| `.github/actions/attest-provenance` | GitHub artifact attestation (signed build provenance) for the final release files; `gh attestation verify <file> --repo sentania-labs/<repo>` checks it (`--owner` also works but accepts any org repo). Covers Linux, which has no OS signing gate. PUBLIC repos only on the org's Team plan (the action checks and says so) | any |
 | `.github/workflows/notary-diagnostics.yml` | ask Apple about recent submissions and a given id; dispatch here or `workflow_call` | macOS |
 | `.github/workflows/signing-selftest.yml` | build a hello binary, sign, notarize (and Windows on request); proves the secrets without a tag | all |
 

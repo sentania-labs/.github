@@ -92,7 +92,7 @@ jobs:
       - name: Verify the attestation the way a downloader would
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh attestation verify dist/hello-${{ matrix.name }} --owner ${{ github.repository_owner }}
+        run: gh attestation verify dist/hello-${{ matrix.name }} --repo ${{ github.repository }}
 
       - name: Result
         run: echo "notarized in ${{ steps.notarize.outputs.seconds }}s (submission ${{ steps.notarize.outputs.submission-id }})"
@@ -164,7 +164,7 @@ jobs:
       - name: Verify the attestation the way a downloader would
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh attestation verify "${{ steps.notarize.outputs.zip }}" --owner ${{ github.repository_owner }}
+        run: gh attestation verify "${{ steps.notarize.outputs.zip }}" --repo ${{ github.repository }}
 
   windows:
     if: inputs.windows
@@ -210,4 +210,4 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh attestation verify dist\hello.exe --owner ${{ github.repository_owner }}
+        run: gh attestation verify dist\hello.exe --repo ${{ github.repository }}

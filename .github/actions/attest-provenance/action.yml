@@ -8,9 +8,11 @@
 # in this repository. No key material exists anywhere; nothing expires on our
 # side. A downloader verifies with
 #
-#   gh attestation verify <file> --owner sentania-labs
+#   gh attestation verify <file> --repo sentania-labs/<repo>
 #
-# which checks the digest against the attestation GitHub stores for the repo.
+# which checks the digest against the attestations GitHub stores for THAT
+# repository. `--owner sentania-labs` also works but accepts an attestation
+# from any repo in the org, so a release page should document `--repo`.
 #
 # Call it ONCE per job on every file the release ships, after the files are
 # final (signed, if they get signed; attesting before signing records a digest
@@ -82,14 +84,20 @@ runs:
           echo "::error::attest-provenance: subject-path is empty"
           exit 1
         fi
-        # Every entry (newline or comma separated, like upstream) must match at
-        # least one REGULAR FILE, or the attestation would silently cover less
-        # than the release ships. nullglob alone does not catch a missing
-        # literal path (it stays in the array as a literal), hence the -f test.
-        shopt -s nullglob globstar
+        # Every include entry (newline or comma separated, like upstream) must
+        # match at least one REGULAR FILE, or the attestation would silently
+        # cover less than the release ships. nullglob alone does not catch a
+        # missing literal path (it stays in the array as a literal), hence the
+        # -f test. Exclusion entries (leading "!") are upstream's business and
+        # are skipped here. macOS ships bash 3.2 without globstar, so "**"
+        # entries are passed through unchecked rather than failing.
+        shopt -s nullglob
+        globstar_ok=0; shopt -s globstar 2>/dev/null && globstar_ok=1
         while IFS= read -r entry; do
           entry="${entry#"${entry%%[![:space:]]*}"}"; entry="${entry%"${entry##*[![:space:]]}"}"
           [ -z "$entry" ] && continue
+          case "$entry" in '!'*) echo "exclusion (not pre-checked): $entry"; continue;; esac
+          if [ "$globstar_ok" -eq 0 ] && [[ "$entry" == *'**'* ]]; then echo "not pre-checked (no globstar in this bash): $entry"; continue; fi
           found=0
           # shellcheck disable=SC2206  # the glob expansion is the point
           for f in $entry; do
