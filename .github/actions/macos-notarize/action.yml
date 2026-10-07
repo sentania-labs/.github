@@ -204,14 +204,30 @@ runs:
           echo "zip=$OUT" >> "$GITHUB_OUTPUT"
           echo "stapled release zip: $OUT"
         else
-          # Reporting, not a gate. A local Gatekeeper assessment of an unstapled
-          # binary is an online lookup whose answer is not reliably servable the
-          # moment notarization finishes, and `spctl --status` can be off on a
-          # runner image. It runs because the output is useful when something
-          # is wrong.
-          echo "--- gatekeeper assessment (advisory) ---"
-          spctl -a -t exec -vv "$BIN" 2>&1 || echo "::warning::spctl did not accept the binary; notarization itself reported Accepted"
-          codesign --verify --strict --test-requirement="=notarized" --verbose=2 "$BIN" 2>&1 || echo "::warning::the notarization requirement did not verify locally; this can be Apple-side propagation"
+          # A bare executable cannot carry a stapled ticket, so a Mac learns it
+          # is notarized by asking Apple online. That lookup is a different
+          # service from the one that just said Accepted and it lags by seconds
+          # to a couple of minutes (seen 2026-10-07: 5 s after Accepted the
+          # Intel runner got "Unnotarized Developer ID"). So the local check
+          # waits for the ticket rather than warning: it retries for up to two
+          # minutes and then FAILS, because a ticket that never shows up is a
+          # real problem a user would hit on first launch.
+          echo "--- notarization ticket visible to this Mac (gate, waits for propagation) ---"
+          deadline=$(( $(date +%s) + 120 )); ok=0
+          while :; do
+            if codesign --verify --strict --test-requirement="=notarized" --verbose=2 "$BIN" 2>&1; then ok=1; break; fi
+            [ "$(date +%s)" -ge "$deadline" ] && break
+            sleep 15
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::Apple reported Accepted but the notarization ticket for $BIN was still not visible after 2 minutes"
+            exit 1
+          fi
+          # spctl stays advisory for a bare executable: with `-t exec` it only
+          # knows how to assess app bundles and answers "the code is valid but
+          # does not seem to be an app" for any loose binary, signed or not.
+          echo "--- gatekeeper assessment (advisory; always 'not an app' for a bare executable) ---"
+          spctl -a -t exec -vv "$BIN" 2>&1 || echo "spctl has no verdict for a bare executable; the ticket check above is the gate"
         fi
 
     - name: Remove the signing keychain and key material

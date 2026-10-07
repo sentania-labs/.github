@@ -100,6 +100,10 @@ jobs:
   macos-bundle:
     needs: secrets
     runs-on: macos-latest
+    permissions:
+      contents: read
+      id-token: write       # attest-provenance (Sigstore identity)
+      attestations: write   # attest-provenance (store on the repo)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -151,6 +155,16 @@ jobs:
           mkdir -p verify && ditto -x -k "${{ steps.notarize.outputs.zip }}" verify
           xcrun stapler validate "verify/Hello Bundle.app"
           spctl -a -t exec -vv "verify/Hello Bundle.app"
+
+      - name: Attest provenance of the release zip
+        uses: ./.github/actions/attest-provenance
+        with:
+          subject-path: ${{ steps.notarize.outputs.zip }}
+
+      - name: Verify the attestation the way a downloader would
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh attestation verify "${{ steps.notarize.outputs.zip }}" --owner ${{ github.repository_owner }}
 
   windows:
     if: inputs.windows
