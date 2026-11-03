@@ -16,6 +16,14 @@
 # the release zip is rebuilt from the stapled app (`ditto -c -k --keepParent`)
 # at `output-zip`. Ship that zip, not the one used for submission.
 #
+# Staple and validate run through staple-retry.sh: up to 5 attempts, sleeping
+# 10, 20, 40, 60 s between them, retrying only on exit code 68 or known
+# transient messages (NSURLErrorDomain, "network connection was lost",
+# "CloudKit's response is inconsistent") and re-stapling when validate reports
+# no ticket. Any other failure stops at once; after the last attempt the run
+# fails with the last error. Each attempt is printed. notarytool submission is
+# not retried.
+#
 # Secrets come from the caller as inputs: NOTARY_ISSUER_ID, NOTARY_KEY_ID,
 # NOTARY_KEY_P8 (base64 of the App Store Connect API key .p8).
 
@@ -191,8 +199,9 @@ runs:
         rm -f "$RUNNER_TEMP/notary.p8"
         if [ -n "$BUNDLE" ]; then
           # A stapled bundle is verifiable offline, so these are gates.
-          xcrun stapler staple "$BUNDLE"
-          xcrun stapler validate "$BUNDLE"
+          # Apple's ticket lookup (api.apple-cloudkit.com) drops connections
+          # now and then; staple-retry.sh retries only those transients.
+          "$GITHUB_ACTION_PATH/staple-retry.sh" "$BUNDLE"
           codesign --verify --deep --strict --verbose=2 "$BUNDLE"
           spctl -a -t exec -vv "$BUNDLE"
           codesign --verify --strict --test-requirement="=notarized" --verbose=2 "$BUNDLE"
