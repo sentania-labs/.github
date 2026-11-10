@@ -47,8 +47,6 @@ jobs:
         include:
           - os: macos-latest        # Apple Silicon
             name: arm64
-          - os: macos-15-intel      # current Intel image (macos-13 is retired)
-            name: x86_64
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
