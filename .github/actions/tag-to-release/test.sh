@@ -53,6 +53,7 @@ assert_match() {
 create_mock_gh() {
   local existing_releases="${1:-}"
   local existing_refs="${2:-}"
+  local fail_discovery="${3:-false}"
   
   cat > "$MOCK_GH" <<EOF
 #!/usr/bin/env bash
@@ -74,10 +75,33 @@ case "\$cmd" in
     shift
     case "\$sub" in
       view)
-        tag="\$1"
+        # Verify --json does not query unsupported fields (e.g. isLatest)
+        args=("\$@")
+        for ((i=0; i<\${#args[@]}; i++)); do
+          if [ "\${args[i]}" = "--json" ] && [ \$((i+1)) -lt \${#args[@]} ]; then
+            fields="\${args[i+1]}"
+            if [[ "\$fields" == *"isLatest"* ]]; then
+              echo 'Unknown JSON field: "isLatest"' >&2
+              exit 1
+            fi
+          fi
+        done
+
+        tag="\${1:-}"
+        # If no tag or tag starts with --, gh release view views latest release
+        if [ -z "\$tag" ] || [[ "\$tag" == --* ]]; then
+          # return latest release tag if any
+          for ex in $existing_releases; do
+            echo '{"tagName":"'\$ex'"}'
+            exit 0
+          done
+          echo "release not found" >&2
+          exit 1
+        fi
+
         for ex in $existing_releases; do
           if [ "\$tag" = "\$ex" ]; then
-            echo '{"id":"123456","url":"https://github.com/sentania-labs/test-repo/releases/tag/'"\$tag"'","isPrerelease":false,"isLatest":false}'
+            echo '{"id":"123456","url":"https://github.com/sentania-labs/test-repo/releases/tag/'"\$tag"'","isPrerelease":false}'
             exit 0
           fi
         done
@@ -85,8 +109,10 @@ case "\$cmd" in
         exit 1
         ;;
       list)
-        echo "[$existing_releases]" >&2
-        # print releases as tagName lines if jq used
+        if [ "$fail_discovery" = "true" ]; then
+          echo "mock error: release list failed" >&2
+          exit 1
+        fi
         for ex in $existing_releases; do
           echo "\$ex"
         done
@@ -101,11 +127,23 @@ case "\$cmd" in
     ;;
   api)
     endpoint="\$1"
+    if [ "$fail_discovery" = "true" ]; then
+      echo "mock error: api call failed" >&2
+      exit 1
+    fi
     if [[ "\$endpoint" == *"git/matching-refs/tags/v"* ]]; then
       for r in $existing_refs; do
         echo "refs/tags/\$r"
       done
       exit 0
+    fi
+    if [[ "\$endpoint" == *"releases/latest"* ]]; then
+      for ex in $existing_releases; do
+        echo '{"tag_name":"'\$ex'"}'
+        exit 0
+      done
+      echo "Not Found" >&2
+      exit 1
     fi
     ;;
 esac
@@ -116,15 +154,52 @@ EOF
   chmod +x "$MOCK_GH"
 }
 
-# --- Test 1: Refuse invalid tags ---
-echo "=== Test 1: Refuse invalid tags ==="
-for bad_tag in "1.2.3" "v1.2" "v1.2.3.4" "main" "latest" "v01.2.3" "release-1.0"; do
+# --- Test 1: Refuse invalid tags and malformed suffixes ---
+echo "=== Test 1: Refuse invalid tags and malformed suffixes ==="
+bad_tags=(
+  "1.2.3"             # missing 'v'
+  "v1.2"              # missing patch
+  "v1.2.3.4"          # four segments
+  "main"              # branch name
+  "latest"            # keyword
+  "v01.2.3"           # leading zero in major
+  "release-1.0"       # unversioned
+  "v1.0.0-01"         # numeric prerelease identifier with leading zero (SemVer 2.0 sec 9)
+  "v1.0.0-alpha..1"   # empty dot-separated prerelease identifier
+  "v1.0.0+build..1"   # empty dot-separated build identifier (SemVer 2.0 sec 10)
+  "v1.0.0-"           # trailing hyphen without identifier
+  "v1.0.0+"           # trailing plus without identifier
+  "v1.0.0-alpha."     # trailing dot in prerelease
+  "v1.0.0+build."     # trailing dot in build metadata
+  "v1.0.0-alpha_1"    # illegal underscore
+)
+
+for bad_tag in "${bad_tags[@]}"; do
   set +e
   out=$(GITHUB_REPOSITORY="sentania-labs/test-repo" GH_TOKEN="dummy" TAG="$bad_tag" bash "$RELEASE_SH" 2>&1)
   rc=$?
   set -e
   assert_eq "Rejects invalid tag '$bad_tag' with exit code 1" "1" "$rc"
   assert_match "Output contains non-version tag refusal" "is not a valid vMAJOR\.MINOR\.PATCH tag" "$out"
+done
+
+# Valid SemVer 2.0 identifiers that must be accepted
+valid_tags=(
+  "v1.0.0-0"
+  "v1.0.0-01a"
+  "v1.0.0-alpha-1.0"
+  "v1.0.0-0.3.7"
+  "v1.0.0+build.01"
+  "v1.0.0+20130313144700"
+  "v1.0.0-beta+exp.sha.5114f85"
+)
+create_mock_gh "" ""
+for vtag in "${valid_tags[@]}"; do
+  set +e
+  out=$(GITHUB_REPOSITORY="sentania-labs/test-repo" GH_TOKEN="dummy" TAG="$vtag" bash "$RELEASE_SH" 2>&1)
+  rc=$?
+  set -e
+  assert_eq "Accepts valid SemVer tag '$vtag' with exit code 0" "0" "$rc"
 done
 
 # --- Test 2: Missing GH_TOKEN fails ---
@@ -136,8 +211,8 @@ set -e
 assert_eq "Fails without token" "1" "$rc"
 assert_match "Output mentions GH_TOKEN missing" "GH_TOKEN / github-token is missing" "$out"
 
-# --- Test 3: Idempotent when release already exists ---
-echo "=== Test 3: Idempotency check ==="
+# --- Test 3: Idempotent when release already exists & queries supported fields ---
+echo "=== Test 3: Idempotency check with supported JSON fields ==="
 create_mock_gh "v1.0.0" ""
 : > "$CALL_LOG"
 out_file="$TEST_TMP/gh_out_3"
@@ -153,6 +228,11 @@ outputs=$(cat "$out_file")
 assert_match "GITHUB_OUTPUT created=false" "created=false" "$outputs"
 assert_match "GITHUB_OUTPUT url matches" "url=https://github.com/sentania-labs/test-repo/releases/tag/v1.0.0" "$outputs"
 assert_match "GITHUB_OUTPUT id matches" "id=123456" "$outputs"
+assert_match "GITHUB_OUTPUT is-latest=true" "is-latest=true" "$outputs"
+
+# Verify calls did NOT request isLatest on gh release view
+calls=$(cat "$CALL_LOG")
+assert_match "gh release view queried id,url,isPrerelease" "gh release view v1.0.0 --repo sentania-labs/test-repo --json id,url,isPrerelease" "$calls"
 
 # Confirm gh release create was NEVER called
 set +e
@@ -191,7 +271,7 @@ assert_match "Calls gh release create with --latest=false" "gh release create v1
 outputs=$(cat "$out_file")
 assert_match "GITHUB_OUTPUT is-latest=false" "is-latest=false" "$outputs"
 
-# --- Test 6: Pre-release suffix detected and never marked latest ---
+# --- Test 6: Pre-release suffix ---
 echo "=== Test 6: Pre-release suffix ==="
 create_mock_gh "v1.0.0" "v1.0.0"
 : > "$CALL_LOG"
@@ -206,8 +286,23 @@ outputs=$(cat "$out_file")
 assert_match "GITHUB_OUTPUT is-prerelease=true" "is-prerelease=true" "$outputs"
 assert_match "GITHUB_OUTPUT is-latest=false" "is-latest=false" "$outputs"
 
-# --- Test 7: Files attachment and glob expansion ---
-echo "=== Test 7: File attachments ==="
+# --- Test 7: Fail closed when version discovery fails ---
+echo "=== Test 7: Fail closed on version discovery failure ==="
+# Discovery fails (both API endpoints return error)
+create_mock_gh "" "" "true"
+: > "$CALL_LOG"
+out_file="$TEST_TMP/gh_out_7"
+: > "$out_file"
+
+out=$(GITHUB_REPOSITORY="sentania-labs/test-repo" GH_TOKEN="dummy" TAG="v1.0.1" GITHUB_OUTPUT="$out_file" bash "$RELEASE_SH" 2>&1)
+assert_match "Logs warning about discovery failure" "failed to discover existing tags and releases.*failing closed" "$out"
+calls=$(cat "$CALL_LOG")
+assert_match "Calls gh release create with --latest=false when discovery fails" "gh release create v1.0.1 .* --latest=false" "$calls"
+outputs=$(cat "$out_file")
+assert_match "GITHUB_OUTPUT is-latest=false on discovery failure" "is-latest=false" "$outputs"
+
+# --- Test 8: Files attachment and glob expansion ---
+echo "=== Test 8: File attachments ==="
 create_mock_gh "" ""
 : > "$CALL_LOG"
 asset_dir="$TEST_TMP/assets"
@@ -223,8 +318,8 @@ assert_match "Includes tar.gz asset" "$asset_dir/app-linux-amd64.tar.gz" "$calls
 assert_match "Includes sha256 asset" "$asset_dir/app-linux-amd64.sha256" "$calls"
 assert_match "Warns about missing file pattern" "no regular file matches pattern.*missing.file" "$out"
 
-# --- Test 8: Notes start tag and draft flags ---
-echo "=== Test 8: Notes start tag and draft flags ==="
+# --- Test 9: Notes start tag and draft flags ---
+echo "=== Test 9: Notes start tag and draft flags ==="
 create_mock_gh "" ""
 : > "$CALL_LOG"
 out=$(GITHUB_REPOSITORY="sentania-labs/test-repo" GH_TOKEN="dummy" TAG="v1.0.0" NOTES_START_TAG="v0.9.0" DRAFT="true" bash "$RELEASE_SH" 2>&1)

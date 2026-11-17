@@ -49,15 +49,13 @@ if [ -z "$TAG" ]; then
   exit 1
 fi
 
-# Validate tag: MUST be vMAJOR.MINOR.PATCH according to SemVer 2.0 with leading 'v'
-# Regex explanation:
-#   ^v                       leading 'v'
-#   (0|[1-9][0-9]*)          major (no leading zeros)
-#   \.(0|[1-9][0-9]*)        minor (no leading zeros)
-#   \.(0|[1-9][0-9]*)        patch (no leading zeros)
-#   (-[0-9A-Za-z.-]+)?       optional pre-release suffix (e.g. -alpha, -rc.1)
-#   (\+[0-9A-Za-z.-]+)?$     optional build metadata
-semver_regex="^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$"
+# Validate tag: MUST be vMAJOR.MINOR.PATCH according to SemVer 2.0 with leading 'v'.
+# Individual dot-separated identifiers in pre-release must be non-empty; numeric
+# pre-release identifiers must not have leading zeros. Build metadata identifiers
+# must be non-empty alphanumeric/hyphen.
+pr_id="0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*"
+b_id="[0-9A-Za-z-]+"
+semver_regex="^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(($pr_id)(\.($pr_id))*))?(\+($b_id(\.$b_id)*))?$"
 if [[ ! "$TAG" =~ $semver_regex ]]; then
   echo "::error::tag-to-release: '$TAG' is not a valid vMAJOR.MINOR.PATCH tag (e.g. v1.2.3, v0.4.2, v1.0.0-rc.1). Non-version tags are refused."
   exit 1
@@ -71,11 +69,29 @@ cur_pre="${BASH_REMATCH[4]}"
 # Check if release already exists (idempotency requirement)
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
   echo "tag-to-release: release for '$TAG' already exists in $REPO; skipping creation (idempotent)."
-  rel_json="$(gh release view "$TAG" --repo "$REPO" --json id,url,isPrerelease,isLatest 2>/dev/null || true)"
+  # gh release view supports: apiUrl, assets, author, body, createdAt, databaseId, id, isDraft,
+  # isImmutable, isPrerelease, name, publishedAt, tagName, tarballUrl, targetCommitish, uploadUrl, url, zipballUrl.
+  # (isLatest is NOT a field on gh release view; query supported fields and do not suppress errors).
+  rel_json="$(gh release view "$TAG" --repo "$REPO" --json id,url,isPrerelease)"
   rel_id="$(echo "$rel_json" | jq -r '.id // ""')"
   rel_url="$(echo "$rel_json" | jq -r '.url // ""')"
   is_pre="$(echo "$rel_json" | jq -r '.isPrerelease // false')"
-  is_lat="$(echo "$rel_json" | jq -r '.isLatest // false')"
+
+  # Determine if this existing release is currently the latest release
+  latest_tag=""
+  if latest_json="$(gh release view --repo "$REPO" --json tagName 2>/dev/null)"; then
+    latest_tag="$(echo "$latest_json" | jq -r '.tagName // empty' 2>/dev/null || true)"
+  fi
+  if [ -z "$latest_tag" ]; then
+    if latest_api="$(gh api "repos/$REPO/releases/latest" 2>/dev/null)"; then
+      latest_tag="$(echo "$latest_api" | jq -r '.tag_name // empty' 2>/dev/null || true)"
+    fi
+  fi
+
+  is_lat="false"
+  if [ -n "$latest_tag" ] && [ "$latest_tag" = "$TAG" ]; then
+    is_lat="true"
+  fi
 
   set_output "created" "false"
   set_output "id" "$rel_id"
@@ -130,34 +146,43 @@ case "$LATEST" in
       higher_found=""
 
       # 1. Fetch remote tags starting with 'v'
-      existing_tags="$(gh api "repos/$REPO/git/matching-refs/tags/v" --paginate --jq '.[].ref' 2>/dev/null | sed 's|^refs/tags/||' || true)"
+      tags_rc=0
+      existing_tags="$(gh api "repos/$REPO/git/matching-refs/tags/v" --paginate --jq '.[].ref' 2>/dev/null | sed 's|^refs/tags/||')" || tags_rc=$?
+
       # 2. Fetch existing published releases
-      existing_releases="$(gh release list --repo "$REPO" --limit 1000 --exclude-drafts --exclude-pre-releases --json tagName --jq '.[].tagName' 2>/dev/null || true)"
+      releases_rc=0
+      existing_releases="$(gh release list --repo "$REPO" --limit 1000 --exclude-drafts --exclude-pre-releases --json tagName --jq '.[].tagName' 2>/dev/null)" || releases_rc=$?
 
-      all_other_tags="$(printf "%s\n%s\n" "$existing_tags" "$existing_releases" | sort -u)"
-
-      stable_regex="^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\+.*)?$"
-      while IFS= read -r otag; do
-        [ -z "$otag" ] && continue
-        [ "$otag" = "$TAG" ] && continue
-        if [[ "$otag" =~ $stable_regex ]]; then
-          o_maj="${BASH_REMATCH[1]}"
-          o_min="${BASH_REMATCH[2]}"
-          o_pat="${BASH_REMATCH[3]}"
-          if (( 10#$o_maj > 10#$cur_maj )) || \
-             (( 10#$o_maj == 10#$cur_maj && 10#$o_min > 10#$cur_min )) || \
-             (( 10#$o_maj == 10#$cur_maj && 10#$o_min == 10#$cur_min && 10#$o_pat > 10#$cur_pat )); then
-            is_latest="false"
-            higher_found="$otag"
-            break
-          fi
-        fi
-      done <<< "$all_other_tags"
-
-      if [ "$is_latest" = "true" ]; then
-        echo "tag-to-release: '$TAG' is the highest version; marking as latest."
+      # If both discovery requests fail, fail closed: do not mark latest to avoid promoting backports
+      if [ "$tags_rc" -ne 0 ] && [ "$releases_rc" -ne 0 ]; then
+        echo "::warning::tag-to-release: failed to discover existing tags and releases from $REPO; failing closed (not marking '$TAG' as latest)."
+        is_latest="false"
       else
-        echo "tag-to-release: found higher version '$higher_found'; not marking '$TAG' as latest."
+        all_other_tags="$(printf "%s\n%s\n" "$existing_tags" "$existing_releases" | sort -u)"
+
+        stable_regex="^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\+($b_id(\.$b_id)*))?$"
+        while IFS= read -r otag; do
+          [ -z "$otag" ] && continue
+          [ "$otag" = "$TAG" ] && continue
+          if [[ "$otag" =~ $stable_regex ]]; then
+            o_maj="${BASH_REMATCH[1]}"
+            o_min="${BASH_REMATCH[2]}"
+            o_pat="${BASH_REMATCH[3]}"
+            if (( 10#$o_maj > 10#$cur_maj )) || \
+               (( 10#$o_maj == 10#$cur_maj && 10#$o_min > 10#$cur_min )) || \
+               (( 10#$o_maj == 10#$cur_maj && 10#$o_min == 10#$cur_min && 10#$o_pat > 10#$cur_pat )); then
+              is_latest="false"
+              higher_found="$otag"
+              break
+            fi
+          fi
+        done <<< "$all_other_tags"
+
+        if [ "$is_latest" = "true" ]; then
+          echo "tag-to-release: '$TAG' is the highest version; marking as latest."
+        else
+          echo "tag-to-release: found higher version '$higher_found'; not marking '$TAG' as latest."
+        fi
       fi
     fi
     ;;
