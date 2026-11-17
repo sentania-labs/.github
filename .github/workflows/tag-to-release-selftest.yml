@@ -24,3 +24,60 @@ jobs:
 
       - name: Run tag-to-release test suite
         run: bash .github/actions/tag-to-release/test.sh
+
+  yaml-parse:
+    name: action.yml parses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Parse every action.yml
+        run: |
+          python3 - <<'PY'
+          import glob, sys, yaml
+          files = sorted(glob.glob('.github/actions/*/action.yml'))
+          if not files:
+              sys.exit('no action.yml files found')
+          bad = 0
+          for f in files:
+              try:
+                  yaml.safe_load(open(f))
+                  print(f'ok    {f}')
+              except yaml.YAMLError as e:
+                  bad += 1
+                  print(f'::error file={f}::invalid YAML: {e}')
+          sys.exit(1 if bad else 0)
+          PY
+
+  load-action:
+    name: Load action via uses (dry run)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Dry run, stable tag
+        id: stable
+        uses: ./.github/actions/tag-to-release
+        with:
+          tag: v999.0.0
+          dry-run: "true"
+
+      - name: Dry run, pre-release tag
+        id: pre
+        uses: ./.github/actions/tag-to-release
+        with:
+          tag: v999.0.0-rc.1
+          dry-run: "true"
+
+      - name: Check dry-run outputs
+        env:
+          STABLE_CREATED: ${{ steps.stable.outputs.created }}
+          STABLE_LATEST: ${{ steps.stable.outputs.is-latest }}
+          PRE_CREATED: ${{ steps.pre.outputs.created }}
+          PRE_PRE: ${{ steps.pre.outputs.is-prerelease }}
+          PRE_LATEST: ${{ steps.pre.outputs.is-latest }}
+        run: |
+          echo "stable: created=$STABLE_CREATED is-latest=$STABLE_LATEST"
+          echo "pre:    created=$PRE_CREATED is-prerelease=$PRE_PRE is-latest=$PRE_LATEST"
+          [ "$STABLE_CREATED" = false ] && [ "$STABLE_LATEST" = true ] \
+            && [ "$PRE_CREATED" = false ] && [ "$PRE_PRE" = true ] && [ "$PRE_LATEST" = false ]

@@ -327,6 +327,32 @@ calls=$(cat "$CALL_LOG")
 assert_match "Includes --notes-start-tag" "--notes-start-tag v0.9.0" "$calls"
 assert_match "Includes --draft" "--draft" "$calls"
 
+# --- Test 10: Dry run decides but creates nothing ---
+echo "=== Test 10: Dry run ==="
+create_mock_gh "v1.0.0" "v1.0.0"
+: > "$CALL_LOG"
+out_file="$TEST_TMP/gh_out_10"
+: > "$out_file"
+out=$(GITHUB_REPOSITORY="sentania-labs/test-repo" GH_TOKEN="dummy" TAG="v1.2.0" DRY_RUN="true" GITHUB_OUTPUT="$out_file" bash "$RELEASE_SH" 2>&1)
+assert_match "Dry run prints latest decision" "dry-run: would create release for v1.2.0 .*prerelease=false, latest=true.*nothing created" "$out"
+set +e
+grep -q "gh release create" "$CALL_LOG"
+create_called=$?
+set -e
+assert_eq "Dry run does not call gh release create" "1" "$create_called"
+outputs=$(cat "$out_file")
+assert_match "Dry run GITHUB_OUTPUT created=false" "created=false" "$outputs"
+assert_match "Dry run GITHUB_OUTPUT is-latest=true" "is-latest=true" "$outputs"
+
+: > "$CALL_LOG"
+out=$(GITHUB_REPOSITORY="sentania-labs/test-repo" GH_TOKEN="dummy" TAG="v2.0.0-rc.1" DRY_RUN="true" bash "$RELEASE_SH" 2>&1)
+assert_match "Dry run prints pre-release decision" "dry-run: would create release for v2.0.0-rc.1 .*prerelease=true, latest=false" "$out"
+set +e
+out=$(GITHUB_REPOSITORY="sentania-labs/test-repo" GH_TOKEN="dummy" TAG="main" DRY_RUN="true" bash "$RELEASE_SH" 2>&1)
+rc=$?
+set -e
+assert_eq "Dry run still validates the tag" "1" "$rc"
+
 echo "=============================="
 echo "Tests completed: $PASS_COUNT passed, $FAIL_COUNT failed"
 if [ "$FAIL_COUNT" -gt 0 ]; then

@@ -214,6 +214,18 @@ if [ -n "${FILES:-}" ]; then
   shopt -u nullglob
 fi
 
+# Dry run: report the decision and stop before anything is created
+if [ "${DRY_RUN:-false}" = "true" ]; then
+  echo "tag-to-release: dry-run: would create release for $TAG in $REPO (prerelease=$is_prerelease, latest=$is_latest, draft=${DRAFT:-false}, assets=${#assets[@]}); nothing created."
+  set_output "created" "false"
+  set_output "id" ""
+  set_output "url" ""
+  set_output "tag" "$TAG"
+  set_output "is-prerelease" "$is_prerelease"
+  set_output "is-latest" "$is_latest"
+  exit 0
+fi
+
 # Build gh release create command
 cmd=(gh release create "$TAG" --repo "$REPO" --verify-tag --generate-notes)
 
