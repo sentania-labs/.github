@@ -1,0 +1,105 @@
+# Create a GitHub Release for a version tag with auto-generated release notes.
+#
+# Calling convention across the org: "tags = release across the board".
+# When a repository pushes a v*.*.* tag, this action creates the GitHub Release
+# for that tag with release notes generated from git history since the previous
+# version tag.
+#
+# Principles:
+# 1. Plain GitHub CLI: Uses runner-native `gh release create --verify-tag --generate-notes`
+#    instead of third-party actions (e.g. archived action-automatic-releases or
+#    softprops/action-gh-release).
+# 2. Strict SemVer: Only vMAJOR.MINOR.PATCH tags are accepted. Non-version tags
+#    (e.g. branch names, 'latest') fail fast before any release is created.
+# 3. Idempotent: If a release for the tag already exists, succeeds immediately
+#    without mutating it. Safe for workflow retries and multi-step jobs.
+# 4. Pre-release awareness: Suffixes (e.g. -rc.1, -beta) automatically mark the
+#    release as a pre-release and never mark it as latest.
+# 5. Accurate latest tracking: Marks "latest" only when the tag is the highest
+#    stable version among existing releases and tags. Backport patch releases
+#    on older major/minor branches will not hijack the "latest" badge.
+# 6. Universal runner support: Pure shell and GitHub CLI; runs on GitHub-hosted
+#    runners (ubuntu-latest) and the lab ARC scale-set pool (runs-on: lab) alike.
+#
+# Required calling permissions:
+#   permissions:
+#     contents: write
+
+name: Tag to release
+description: Create an idempotent GitHub Release from a version tag with generated notes.
+
+inputs:
+  tag:
+    description: Git tag to release (e.g. v1.2.3, v0.4.2). Must match vMAJOR.MINOR.PATCH. Defaults to github.ref_name.
+    required: false
+    default: ${{ github.ref_name }}
+  files:
+    description: Optional file paths or glob patterns to upload as release assets (e.g. dist/*).
+    required: false
+    default: ""
+  notes-start-tag:
+    description: Start tag of the range for generating release notes. Defaults to the previous release tag.
+    required: false
+    default: ""
+  draft:
+    description: Save release as draft instead of publishing it.
+    required: false
+    default: "false"
+  prerelease:
+    description: Mark release as pre-release. Choices: 'auto' (true if tag has suffix like -rc.1), 'true', 'false'.
+    required: false
+    default: "auto"
+  latest:
+    description: Mark release as latest. Choices: 'auto' (true only if highest stable version), 'true', 'false'.
+    required: false
+    default: "auto"
+  title:
+    description: Release title. Defaults to tag name if not specified.
+    required: false
+    default: ""
+  discussion-category:
+    description: Category name to start a discussion in for this release.
+    required: false
+    default: ""
+  github-token:
+    description: GitHub token with contents:write permission. Defaults to github.token.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  url:
+    description: URL of the GitHub Release.
+    value: ${{ steps.release.outputs.url }}
+  id:
+    description: Release database ID.
+    value: ${{ steps.release.outputs.id }}
+  tag:
+    description: Tag of the release.
+    value: ${{ steps.release.outputs.tag }}
+  created:
+    description: Whether a new release was created (true) or skipped because it already existed (false).
+    value: ${{ steps.release.outputs.created }}
+  is-prerelease:
+    description: Whether the release was marked as a pre-release.
+    value: ${{ steps.release.outputs.is-prerelease }}
+  is-latest:
+    description: Whether the release was marked as latest.
+    value: ${{ steps.release.outputs.is-latest }}
+
+runs:
+  using: composite
+  steps:
+    - id: release
+      shell: bash
+      env:
+        TAG: ${{ inputs.tag }}
+        FILES: ${{ inputs.files }}
+        NOTES_START_TAG: ${{ inputs.notes-start-tag }}
+        DRAFT: ${{ inputs.draft }}
+        PRERELEASE: ${{ inputs.prerelease }}
+        LATEST: ${{ inputs.latest }}
+        TITLE: ${{ inputs.title }}
+        DISCUSSION_CATEGORY: ${{ inputs.discussion-category }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        GITHUB_ACTION_PATH: ${{ github.action_path }}
+      run: bash "$GITHUB_ACTION_PATH/release.sh"
