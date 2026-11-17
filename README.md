@@ -170,3 +170,131 @@ Things worth knowing:
   usually it is under a minute.
 - The first consumer was vcf-cf-migrator, whose release workflow carried all of
   this inline until 2026-09-30.
+
+## Tag to release
+
+Create a GitHub Release whenever a version tag (`v*.*.*`) is pushed, with release
+notes automatically generated from git commits since the previous version tag
+("tags = release across the board"). Replaces third-party actions such as
+`marvinpinto/action-automatic-releases` (archived upstream) and
+`softprops/action-gh-release` with standard GitHub CLI tooling (`gh release create
+--verify-tag --generate-notes`).
+
+### Why a composite action instead of a reusable workflow
+
+Decided on a composite action under `.github/actions/tag-to-release`:
+
+1. **Step composability**: Can run directly inside existing build jobs that attach
+   installers or binaries (`with: files: dist/*`) without needing cross-job
+   artifact upload and download steps.
+2. **Runner placement**: Follows the lab's `github-ci` placement rules directly
+   (`runs-on: lab` for private repos to avoid metered minutes; `runs-on: ubuntu-latest`
+   for public repos) without having to thread runner inputs through reusable workflow
+   parameters.
+3. **Smallest possible caller**: Because `gh` talks directly to GitHub's API via
+   `github.token` without needing a local git checkout, a minimal release-only
+   workflow requires no checkout step: just the tag trigger, `permissions: contents: write`,
+   and a single `uses:` step.
+
+### Behavior and contract
+
+- **Strict SemVer**: Accepts only `vMAJOR.MINOR.PATCH` tags (e.g. `v1.2.3`, `v0.4.2`,
+  `v1.0.0-rc.1`). Refuses non-version tags (branch names, `latest`, missing patch)
+  loudly before any release is created.
+- **Idempotent**: If a release for the tag already exists, succeeds immediately
+  without mutating it. Safe for workflow retries and multi-step workflows.
+- **Pre-releases**: Tags with a pre-release suffix (e.g. `-rc.1`, `-beta`) are
+  automatically marked as pre-releases and never marked as latest.
+- **Accurate latest**: Compares against existing releases and tags in the repository;
+  marks `latest` only when the tag is the highest stable version. Backport patch
+  releases (e.g. `v1.0.1` after `v2.0.0` exists) will not hijack the "latest" badge.
+- **Universal runners**: Plain bash and GitHub CLI; runs on GitHub-hosted runners
+  (`ubuntu-latest`) and the lab ARC scale-set pool (`runs-on: lab`) with no Docker
+  requirement.
+
+### Pinning
+
+Callers should pin to the major version tag `@v1`:
+
+```yaml
+uses: sentania-labs/.github/.github/actions/tag-to-release@v1
+```
+
+Why `@v1` instead of commit SHA:
+Unlike signing secrets which have sensitive credential blast radius and require
+immutable SHA pins, `tag-to-release` is an org-wide utility action. Pinning to `@v1`
+allows repositories across the org to receive non-breaking bug fixes, GitHub CLI
+updates, and SemVer parsing refinements automatically without requiring manual SHA
+bumps across a dozen repositories. Repositories that enforce immutable dependencies
+may still pin to a full commit SHA.
+
+*(Note: The owner will tag `v1` on this repository after merging; callers pin to `@v1`.)*
+
+### Minimal caller (release only)
+
+Paste into `.github/workflows/release.yml`:
+
+```yaml
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest # or runs-on: lab for private repos
+    permissions:
+      contents: write
+    steps:
+      - uses: sentania-labs/.github/.github/actions/tag-to-release@v1
+```
+
+### Caller with build assets (installers / binaries)
+
+```yaml
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest # or runs-on: lab for private repos
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      # ... build your artifacts in dist/ ...
+      - uses: sentania-labs/.github/.github/actions/tag-to-release@v1
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
+```
+
+### Inputs and outputs
+
+| input | description | default |
+|---|---|---|
+| `tag` | Git tag to release. Must match `vMAJOR.MINOR.PATCH`. | `${{ github.ref_name }}` |
+| `files` | Optional newline- or space-separated files or globs to attach (e.g. `dist/*`). | `""` |
+| `notes-start-tag` | Tag to use as start of notes range. If omitted, uses previous release tag. | `""` |
+| `draft` | Save release as draft instead of publishing. | `false` |
+| `prerelease` | Mark as pre-release: `auto` (default, true if tag has suffix like `-rc.1`), `true`, `false`. | `auto` |
+| `latest` | Mark as latest: `auto` (default, true if highest stable version), `true`, `false`. | `auto` |
+| `title` | Release title. Defaults to tag name. | `""` |
+| `github-token` | GitHub token with `contents: write`. | `${{ github.token }}` |
+
+| output | description |
+|---|---|
+| `url` | URL of the GitHub Release. |
+| `id` | Release database ID. |
+| `tag` | The tag of the release. |
+| `created` | Whether a new release was created (`true`) or skipped because it existed (`false`). |
+| `is-prerelease` | Whether the release was marked as a pre-release (`true` or `false`). |
+| `is-latest` | Whether the release was marked as latest (`true` or `false`). |
+

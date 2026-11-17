@@ -1,0 +1,26 @@
+# Prove tag-to-release logic works across all test scenarios without leaving a release behind.
+#
+# Runs unit tests for tag validation, idempotency, prerelease detection, highest-version
+# calculation, file glob expansion, and failure modes using mock GitHub CLI responses.
+
+name: Tag to release self-test
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/actions/tag-to-release/**'
+      - '.github/workflows/tag-to-release-selftest.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit and mock tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run tag-to-release test suite
+        run: bash .github/actions/tag-to-release/test.sh
