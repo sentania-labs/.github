@@ -30,60 +30,64 @@ description: Create an idempotent GitHub Release from a version tag with generat
 
 inputs:
   tag:
-    description: Git tag to release (e.g. v1.2.3, v0.4.2). Must match vMAJOR.MINOR.PATCH. Defaults to github.ref_name.
+    description: "Git tag to release (e.g. v1.2.3, v0.4.2). Must match vMAJOR.MINOR.PATCH. Defaults to github.ref_name."
     required: false
     default: ${{ github.ref_name }}
   files:
-    description: Optional file paths or glob patterns to upload as release assets (e.g. dist/*).
+    description: "Optional file paths or glob patterns to upload as release assets (e.g. dist/*)."
     required: false
     default: ""
   notes-start-tag:
-    description: Start tag of the range for generating release notes. Defaults to the previous release tag.
+    description: "Start tag of the range for generating release notes. Defaults to the previous release tag."
     required: false
     default: ""
   draft:
-    description: Save release as draft instead of publishing it.
+    description: "Save release as draft instead of publishing it."
     required: false
     default: "false"
   prerelease:
-    description: Mark release as pre-release. Choices: 'auto' (true if tag has suffix like -rc.1), 'true', 'false'.
+    description: "Mark release as pre-release. Choices: 'auto' (true if tag has suffix like -rc.1), 'true', 'false'."
     required: false
     default: "auto"
   latest:
-    description: Mark release as latest. Choices: 'auto' (true only if highest stable version), 'true', 'false'.
+    description: "Mark release as latest. Choices: 'auto' (true only if highest stable version), 'true', 'false'."
     required: false
     default: "auto"
   title:
-    description: Release title. Defaults to tag name if not specified.
+    description: "Release title. Defaults to tag name if not specified."
     required: false
     default: ""
   discussion-category:
-    description: Category name to start a discussion in for this release.
+    description: "Category name to start a discussion in for this release."
     required: false
     default: ""
+  dry-run:
+    description: "Validate the tag and print the pre-release/latest decision, but create nothing. Choices: 'true' or 'false'."
+    required: false
+    default: "false"
   github-token:
-    description: GitHub token with contents:write permission. Defaults to github.token.
+    description: "GitHub token with contents:write permission. Defaults to github.token."
     required: false
     default: ${{ github.token }}
 
 outputs:
   url:
-    description: URL of the GitHub Release.
+    description: "URL of the GitHub Release."
     value: ${{ steps.release.outputs.url }}
   id:
-    description: Release database ID.
+    description: "Release database ID."
     value: ${{ steps.release.outputs.id }}
   tag:
-    description: Tag of the release.
+    description: "Tag of the release."
     value: ${{ steps.release.outputs.tag }}
   created:
-    description: Whether a new release was created (true) or skipped because it already existed (false).
+    description: "Whether a new release was created (true) or skipped because it already existed (false)."
     value: ${{ steps.release.outputs.created }}
   is-prerelease:
-    description: Whether the release was marked as a pre-release.
+    description: "Whether the release was marked as a pre-release."
     value: ${{ steps.release.outputs.is-prerelease }}
   is-latest:
-    description: Whether the release was marked as latest.
+    description: "Whether the release was marked as latest."
     value: ${{ steps.release.outputs.is-latest }}
 
 runs:
@@ -100,6 +104,7 @@ runs:
         LATEST: ${{ inputs.latest }}
         TITLE: ${{ inputs.title }}
         DISCUSSION_CATEGORY: ${{ inputs.discussion-category }}
+        DRY_RUN: ${{ inputs.dry-run }}
         GH_TOKEN: ${{ inputs.github-token }}
         GITHUB_ACTION_PATH: ${{ github.action_path }}
       run: bash "$GITHUB_ACTION_PATH/release.sh"

@@ -287,6 +287,7 @@ jobs:
 | `prerelease` | Mark as pre-release: `auto` (default, true if tag has suffix like `-rc.1`), `true`, `false`. | `auto` |
 | `latest` | Mark as latest: `auto` (default, true if highest stable version), `true`, `false`. | `auto` |
 | `title` | Release title. Defaults to tag name. | `""` |
+| `dry-run` | Validate the tag and print the pre-release/latest decision, but create nothing. | `false` |
 | `github-token` | GitHub token with `contents: write`. | `${{ github.token }}` |
 
 | output | description |
